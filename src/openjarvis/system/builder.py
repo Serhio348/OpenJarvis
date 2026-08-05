@@ -48,6 +48,7 @@ class SystemBuilder:
         self._sessions: Optional[bool] = None
         self._speech: Optional[bool] = None
         self._mcp_clients: List = []
+        self._mcp_tools: List[BaseTool] = []
 
     def engine(self, key: str) -> SystemBuilder:
         self._engine_key = key
@@ -291,6 +292,7 @@ class SystemBuilder:
             model=model,
             agent_name=agent_name,
             tools=tool_list,
+            mcp_tools=list(self._mcp_tools),
             tool_executor=tool_executor,
             memory_backend=memory_backend,
             channel_backend=channel_backend,
@@ -440,7 +442,7 @@ class SystemBuilder:
         else:
             tools = []
 
-        if config.tools.mcp.servers:
+        if config.tools.mcp.enabled and config.tools.mcp.servers:
             try:
                 import json
 
@@ -449,6 +451,7 @@ class SystemBuilder:
                     for server_cfg in server_list:
                         try:
                             external_tools = self._discover_external_mcp(server_cfg)
+                            self._mcp_tools.extend(external_tools)
                             if tool_names:
                                 external_tools = [
                                     t

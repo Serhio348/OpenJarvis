@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 from openjarvis.mcp.client import MCPClient
-from openjarvis.mcp.protocol import MCPError
+from openjarvis.mcp.protocol import MCPError, MCPResponse
 from openjarvis.mcp.server import MCPServer
 from openjarvis.mcp.transport import InProcessTransport
 from openjarvis.tools._stubs import ToolSpec
@@ -101,3 +105,35 @@ class TestMCPClient:
         result = client.call_tool("think")
         # Think tool echoes empty thought
         assert result["isError"] is False
+
+    def test_shared_client_serializes_transport_round_trips(self):
+        """Concurrent agents cannot consume one another's MCP responses."""
+
+        class _ConcurrencyProbeTransport:
+            def __init__(self):
+                self.active = 0
+                self.max_active = 0
+                self.lock = threading.Lock()
+
+            def send(self, request):
+                with self.lock:
+                    self.active += 1
+                    self.max_active = max(self.max_active, self.active)
+                time.sleep(0.01)
+                with self.lock:
+                    self.active -= 1
+                return MCPResponse(result={"tools": []}, id=request.id)
+
+            def send_notification(self, request):
+                return None
+
+            def close(self):
+                return None
+
+        transport = _ConcurrencyProbeTransport()
+        shared_client = MCPClient(transport)
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(lambda _: shared_client.list_tools(), range(24)))
+
+        assert transport.max_active == 1

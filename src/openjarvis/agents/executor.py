@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import threading
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -14,6 +16,7 @@ from openjarvis.agents.errors import (
     classify_error,
     retry_delay,
 )
+from openjarvis.agents.tool_resolver import resolve_agent_tools
 from openjarvis.core.events import EventBus, EventType
 
 if TYPE_CHECKING:
@@ -31,6 +34,32 @@ _MAX_RETRIES = 3
 # actually invokes web_search / memory_retrieve. Explicit ``config["model"]``
 # on an agent still wins.
 _AGENT_TICK_DEFAULT_MODEL = "gemma4:31b"
+
+
+def _tool_calls_for_storage(result: AgentResult) -> list[dict[str, Any]] | None:
+    """Convert executor tool results to the managed-message storage contract."""
+
+    calls: list[dict[str, Any]] = []
+    for tool_result in result.tool_results:
+        metadata = getattr(tool_result, "metadata", {}) or {}
+        arguments = metadata.get("arguments", "")
+        if not isinstance(arguments, str):
+            try:
+                arguments = json.dumps(arguments, sort_keys=True)
+            except (TypeError, ValueError):
+                arguments = json.dumps(str(arguments))
+        calls.append(
+            {
+                "tool": getattr(tool_result, "tool_name", ""),
+                "arguments": arguments,
+                "result": getattr(tool_result, "content", "") or "",
+                "success": bool(getattr(tool_result, "success", False)),
+                # SSE and the frontend persist/display latency in milliseconds.
+                "latency": float(getattr(tool_result, "latency_seconds", 0.0) or 0.0)
+                * 1000.0,
+            }
+        )
+    return calls or None
 
 
 class AgentExecutor:
@@ -51,6 +80,7 @@ class AgentExecutor:
         self._manager = manager
         self._bus = event_bus
         self._trace_store = trace_store
+        self._toolkit_local = threading.local()
 
     def set_system(self, system: Any) -> None:
         """Deferred system injection — called after JarvisSystem is constructed."""
@@ -62,27 +92,6 @@ class AgentExecutor:
             self._manager.update_agent(agent_id, current_activity=activity)
         except Exception:
             pass  # Non-critical
-
-    def _inject_tool_deps(self, tool: Any) -> None:
-        """Inject runtime dependencies into a tool instance.
-
-        Mirrors SystemBuilder._inject_tool_deps (system.py:920-945)
-        but uses the lightweight system's references.
-        """
-        if self._system is None:
-            return
-        name = getattr(getattr(tool, "spec", None), "name", "")
-        if name == "llm":
-            if hasattr(tool, "_engine"):
-                tool._engine = self._system.engine
-            if hasattr(tool, "_model"):
-                tool._model = self._system.model
-        elif name == "retrieval" or name.startswith("memory_"):
-            if hasattr(tool, "_backend"):
-                tool._backend = getattr(self._system, "memory_backend", None)
-        elif name.startswith("channel_"):
-            if hasattr(tool, "_channel"):
-                tool._channel = getattr(self._system, "channel_backend", None)
 
     def run_ephemeral(
         self,
@@ -248,7 +257,20 @@ class AgentExecutor:
         raise last_error or FatalError("max retries exhausted")
 
     def _invoke_agent(self, agent: dict) -> AgentResult:
-        """Invoke the actual agent run. Tests mock this method."""
+        """Invoke one agent while owning every resource its resolver opens."""
+
+        previous = getattr(self._toolkit_local, "current", None)
+        self._toolkit_local.current = None
+        try:
+            return self._invoke_agent_impl(agent)
+        finally:
+            current = getattr(self._toolkit_local, "current", None)
+            if current is not None:
+                current.close()
+            self._toolkit_local.current = previous
+
+    def _invoke_agent_impl(self, agent: dict) -> AgentResult:
+        """Implementation split out so the wrapper owns resolver lifetime."""
         from openjarvis.agents import AgentRegistry
 
         agent_type = agent.get("agent_type", "monitor_operative")
@@ -300,57 +322,61 @@ class AgentExecutor:
             except Exception:
                 pass  # Fall back to configured model
 
-        # Resolve tools from config via ToolRegistry
-        tool_names = config.get("tools", [])
-        if isinstance(tool_names, str):
-            tool_names = [t.strip() for t in tool_names.split(",") if t.strip()]
+        mcp_tools: list[Any] = []
+        mcp_clients: list[Any] = []
+        if config.get("mcp_tools", True) is not False and self._system is not None:
+            provider = getattr(
+                self._system,
+                "get_managed_agent_mcp_tools",
+                None,
+            )
+            if callable(provider):
+                try:
+                    mcp_tools, mcp_clients = provider()
+                except Exception as exc:
+                    logger.warning("Managed-agent MCP discovery failed: %s", exc)
+            else:
+                mcp_tools = list(getattr(self._system, "mcp_tools", []) or [])
+                mcp_clients = list(getattr(self._system, "_mcp_clients", []) or [])
 
-        tool_instances: list[Any] = []
-        if tool_names:
-            try:
-                from openjarvis.server.agent_manager_routes import (
-                    _ensure_registries_populated,
-                )
+            if not mcp_tools:
+                try:
+                    from openjarvis.tools.mcp_adapter import MCPToolAdapter
 
-                _ensure_registries_populated()
-            except ImportError:
-                pass
-            from openjarvis.core.registry import ToolRegistry
+                    pool = (
+                        getattr(
+                            getattr(self._system, "tool_executor", None),
+                            "_tools",
+                            {},
+                        )
+                        or {}
+                    )
+                    mcp_tools = [
+                        tool
+                        for tool in pool.values()
+                        if isinstance(tool, MCPToolAdapter)
+                    ]
+                except Exception:
+                    mcp_tools = []
 
-            for tname in tool_names:
-                if ToolRegistry.contains(tname):
-                    try:
-                        tool_cls = ToolRegistry.get(tname)
-                        tool = tool_cls()
-                        self._inject_tool_deps(tool)
-                        tool_instances.append(tool)
-                    except Exception:
-                        logger.warning("Failed to instantiate tool %s", tname)
-
-            # Pull tools already discovered by SystemBuilder (e.g. external MCP
-            # adapters) that aren't in the static ToolRegistry. Without this,
-            # agents declaring MCP-discovered tools in their template would
-            # silently fall back to natives only.
-            if (
-                self._system is not None
-                and getattr(self._system, "tool_executor", None) is not None
-            ):
-                mcp_pool = getattr(self._system.tool_executor, "_tools", {}) or {}
-                existing = {t.spec.name for t in tool_instances}
-                for tname in tool_names:
-                    if tname in existing:
-                        continue
-                    pooled = mcp_pool.get(tname)
-                    if pooled is not None:
-                        tool_instances.append(pooled)
-
-            if tool_instances:
-                logger.info(
-                    "Agent %s: resolved %d/%d tools",
-                    agent["name"],
-                    len(tool_instances),
-                    len(tool_names),
-                )
+        resolved_toolkit = resolve_agent_tools(
+            agent,
+            engine=engine,
+            model=model,
+            memory_backend=getattr(self._system, "memory_backend", None),
+            channel_backend=getattr(self._system, "channel_backend", None),
+            mcp_tools=mcp_tools,
+            mcp_clients=mcp_clients,
+            knowledge_db_path=getattr(self._system, "knowledge_db_path", None),
+        )
+        self._toolkit_local.current = resolved_toolkit
+        tool_instances = resolved_toolkit.instances
+        logger.info(
+            "Agent %s: resolved %d tools (%s)",
+            agent["name"],
+            len(tool_instances),
+            ", ".join(resolved_toolkit.by_name) or "none",
+        )
 
         # Construct agent instance
         agent_kwargs: dict[str, Any] = {}
@@ -415,12 +441,24 @@ class AgentExecutor:
                 )
 
         try:
-            agent_instance = agent_cls(engine, model, **agent_kwargs, **state_kwargs)
-        except TypeError:
             try:
-                agent_instance = agent_cls(engine, model, **agent_kwargs)
+                agent_instance = agent_cls(
+                    engine,
+                    model,
+                    **agent_kwargs,
+                    **state_kwargs,
+                )
             except TypeError:
-                agent_instance = agent_cls(engine, model)
+                try:
+                    agent_instance = agent_cls(engine, model, **agent_kwargs)
+                except TypeError:
+                    agent_instance = agent_cls(engine, model)
+        except Exception:
+            resolved_toolkit.close()
+            raise
+
+        if resolved_toolkit.mcp_clients:
+            agent_instance._mcp_clients = resolved_toolkit.mcp_clients
 
         # Inject the managed-agent UUID into the agent's ToolExecutor so
         # emitted TOOL_CALL_START/END events carry it; the trace subscriber
@@ -551,20 +589,23 @@ class AgentExecutor:
             len(input_text),
         )
         _t0 = time.time()
-        result = agent_instance.run(input_text, context=agent_ctx)
-
-        # Retry once if the model returned empty content (common with
-        # Qwen3.5 thinking mode consuming all tokens).
-        if not (result.content or "").strip():
-            self._set_activity(
-                agent["id"],
-                "Retrying (empty response)...",
-            )
-            logger.warning(
-                "Agent %s: empty content, retrying once",
-                agent["name"],
-            )
+        try:
             result = agent_instance.run(input_text, context=agent_ctx)
+
+            # Retry once if the model returned empty content (common with
+            # Qwen3.5 thinking mode consuming all tokens).
+            if not (result.content or "").strip():
+                self._set_activity(
+                    agent["id"],
+                    "Retrying (empty response)...",
+                )
+                logger.warning(
+                    "Agent %s: empty content, retrying once",
+                    agent["name"],
+                )
+                result = agent_instance.run(input_text, context=agent_ctx)
+        finally:
+            resolved_toolkit.close()
 
         _elapsed = time.time() - _t0
         logger.info(
@@ -655,7 +696,11 @@ class AgentExecutor:
                 # message keeps the complete report. The old [:2000] slices
                 # double-truncated and cut findings off mid-sentence.
                 self._manager.update_summary_memory(agent_id, result.content)
-                self._manager.store_agent_response(agent_id, result.content)
+                self._manager.store_agent_response(
+                    agent_id,
+                    result.content,
+                    tool_calls=_tool_calls_for_storage(result),
+                )
 
             # Budget enforcement (post-tick check)
             agent_data = self._manager.get_agent(agent_id)

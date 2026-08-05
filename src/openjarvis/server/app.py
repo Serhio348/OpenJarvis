@@ -155,6 +155,8 @@ def create_app(
     speech_backend=None,
     agent_manager=None,
     agent_scheduler=None,
+    mcp_tools=None,
+    mcp_clients=None,
     api_key: str = "",
     webhook_config: dict | None = None,
     cors_origins: list[str] | None = None,
@@ -226,10 +228,20 @@ def create_app(
     app.state.speech_backend = speech_backend
     app.state.agent_manager = agent_manager
     app.state.agent_scheduler = agent_scheduler
+    app.state.mcp_tools = list(mcp_tools or [])
+    app.state._mcp_clients = list(mcp_clients or [])
     app.state.session_start = time.time()
     # Exposed so WebSocket handlers can authenticate the handshake (the HTTP
     # AuthMiddleware never sees WS upgrade requests). Empty = auth disabled.
     app.state.api_key = api_key
+
+    @app.on_event("shutdown")
+    async def _shutdown_mcp_clients() -> None:
+        for client in app.state._mcp_clients:
+            try:
+                client.close()
+            except Exception:
+                logger.debug("MCP client shutdown failed", exc_info=True)
 
     # Wire up trace store if traces are enabled.
     #

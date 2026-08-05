@@ -118,7 +118,7 @@ def test_does_not_cache_empty_results(mock_load_config: MagicMock):
 
     with (
         patch("openjarvis.mcp.transport.StreamableHTTPTransport"),
-        patch("openjarvis.mcp.client.MCPClient"),
+        patch("openjarvis.mcp.client.MCPClient") as MockClient,
         patch("openjarvis.tools.mcp_adapter.MCPToolProvider") as MockProvider,
     ):
         # First call: discovery returns empty
@@ -127,6 +127,8 @@ def test_does_not_cache_empty_results(mock_load_config: MagicMock):
 
         tools1, _ = _get_mcp_tools(app_state)
         assert len(tools1) == 0
+        MockClient.return_value.close.assert_called_once_with()
+        assert getattr(app_state, "_mcp_clients", []) == []
 
         # Verify no cache was set (empty result)
         assert getattr(app_state, "_mcp_tools_cache", None) is None
@@ -152,3 +154,38 @@ def test_handles_config_load_failure(mock_load_config: MagicMock):
 
     assert tools == []
     assert adapters == {}
+
+
+@patch("openjarvis.core.config.load_config")
+def test_uses_preloaded_full_system_pool(mock_load_config: MagicMock):
+    """Server and scheduled paths reuse one unfiltered MCP discovery."""
+
+    from openjarvis.server.agent_manager_routes import _get_mcp_tools
+
+    adapter = _make_adapter("preloaded_tool")
+    app_state = _FakeAppState()
+    app_state.mcp_tools = [adapter]
+
+    tools, adapters = _get_mcp_tools(app_state)
+
+    mock_load_config.assert_not_called()
+    assert tools[0]["function"]["name"] == "preloaded_tool"
+    assert adapters == {"preloaded_tool": adapter}
+
+
+@patch("openjarvis.core.config.load_config")
+def test_preloaded_duplicate_names_are_first_wins(mock_load_config: MagicMock):
+    """SSE and executor paths choose the same adapter on name collisions."""
+
+    from openjarvis.server.agent_manager_routes import _get_mcp_tools
+
+    first = _make_adapter("duplicate")
+    second = _make_adapter("duplicate")
+    app_state = _FakeAppState()
+    app_state.mcp_tools = [first, second]
+
+    tools, adapters = _get_mcp_tools(app_state)
+
+    mock_load_config.assert_not_called()
+    assert len(tools) == 1
+    assert adapters == {"duplicate": first}

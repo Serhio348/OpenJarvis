@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import threading
 from typing import Any, Dict, List
 
 from openjarvis.mcp.protocol import MCPError, MCPRequest, MCPResponse
@@ -24,18 +25,23 @@ class MCPClient:
         self._initialized = False
         self._capabilities: Dict[str, Any] = {}
         self._id_counter = itertools.count(1)
+        # A client may be shared by server, scheduled, and channel agents.
+        # Keep each transport request/response exchange atomic so stdio
+        # readers cannot consume another thread's JSON-RPC response.
+        self._request_lock = threading.RLock()
 
     def _next_id(self) -> int:
         return next(self._id_counter)
 
     def _send(self, method: str, params: Dict[str, Any] | None = None) -> MCPResponse:
         """Send a request and check for errors."""
-        request = MCPRequest(
-            method=method,
-            params=params or {},
-            id=self._next_id(),
-        )
-        response = self._transport.send(request)
+        with self._request_lock:
+            request = MCPRequest(
+                method=method,
+                params=params or {},
+                id=self._next_id(),
+            )
+            response = self._transport.send(request)
         if response.error is not None:
             raise MCPError(
                 code=response.error.get("code", -1),
@@ -75,7 +81,8 @@ class MCPClient:
             params=params or {},
             id=None,  # None → no id field in JSON (notification)
         )
-        self._transport.send_notification(request)
+        with self._request_lock:
+            self._transport.send_notification(request)
 
     def list_tools(self) -> List[ToolSpec]:
         """Discover available tools from the server.
@@ -114,7 +121,8 @@ class MCPClient:
 
     def close(self) -> None:
         """Close the transport connection."""
-        self._transport.close()
+        with self._request_lock:
+            self._transport.close()
 
     def __enter__(self) -> MCPClient:
         return self

@@ -61,6 +61,7 @@ class JarvisSystem:
     agent: Optional[BaseAgent] = None
     agent_name: str = ""
     tools: List[BaseTool] = field(default_factory=list)
+    mcp_tools: List[BaseTool] = field(default_factory=list)
     tool_executor: Optional[ToolExecutor] = None
     memory_backend: Optional[MemoryBackend] = None
     channel_backend: Optional[BaseChannel] = None
