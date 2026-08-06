@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re as _re
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 from openjarvis.agents.manager import AgentManager
@@ -28,6 +29,44 @@ except ImportError:
     raise ImportError("fastapi and pydantic are required for server routes")
 
 logger = logging.getLogger("openjarvis.server.agent_manager")
+_MEMORY_BACKEND_LOCK_SETUP = threading.Lock()
+_MCP_LOCK_SETUP = threading.Lock()
+
+
+def _start_managed_worker(app_state: Any, target: Any, *, name: str) -> Any:
+    """Start and track a managed-agent worker for orderly app shutdown."""
+
+    lock = getattr(app_state, "_managed_worker_lock", None)
+    if lock is None:
+        lock = threading.Lock()
+        app_state._managed_worker_lock = lock
+    workers = getattr(app_state, "_managed_workers", None)
+    if workers is None:
+        workers = set()
+        app_state._managed_workers = workers
+
+    thread: threading.Thread
+
+    def _run() -> None:
+        try:
+            target()
+        finally:
+            with lock:
+                workers.discard(thread)
+
+    with lock:
+        if getattr(app_state, "_managed_runtime_stopping", False):
+            raise RuntimeError("managed-agent runtime is shutting down")
+        thread = threading.Thread(target=_run, daemon=True, name=name)
+        workers.add(thread)
+        try:
+            # Shutdown must never snapshot an added-but-not-started thread,
+            # because joining such a thread raises instead of draining it.
+            thread.start()
+        except Exception:
+            workers.discard(thread)
+            raise
+    return thread
 
 
 class CreateAgentRequest(BaseModel):
@@ -74,11 +113,12 @@ class FeedbackRequest(BaseModel):
 def _resolve_memory_backend(config: Any) -> Any:
     """Instantiate the configured memory backend, or None if unavailable.
 
-    Mirrors serve.py's setup so an agent tick that runs through the server
-    can actually use its memory_* tools. Returns None (so the tools degrade
-    gracefully) when memory context is disabled or the backend can't load.
+    Memory storage is a tool dependency, independent of whether retrieved
+    context is injected into prompts.  ``context_from_memory`` controls only
+    that prompt enrichment; explicitly configured ``memory_*`` tools still
+    need a backend when it is false.
     """
-    if config is None or not getattr(config.agent, "context_from_memory", False):
+    if config is None:
         return None
     try:
         import openjarvis.tools.storage  # noqa: F401
@@ -90,6 +130,87 @@ def _resolve_memory_backend(config: Any) -> Any:
     except Exception:
         logger.debug("Lightweight system: memory backend init failed", exc_info=True)
     return None
+
+
+def _memory_backend_lock(app_state: Any) -> threading.Lock:
+    """Return the per-runtime lock, creating it safely for lightweight tests."""
+
+    lock = getattr(app_state, "_memory_backend_lock", None)
+    if lock is not None:
+        return lock
+    with _MEMORY_BACKEND_LOCK_SETUP:
+        lock = getattr(app_state, "_memory_backend_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            app_state._memory_backend_lock = lock
+    return lock
+
+
+def _get_or_create_memory_backend(app_state: Any, config: Any = None) -> Any:
+    """Return one runtime-owned memory backend, even under concurrent ticks."""
+
+    if app_state is None:
+        return None
+    backend = getattr(app_state, "memory_backend", None)
+    if backend is not None:
+        return backend
+
+    lock = _memory_backend_lock(app_state)
+    with lock:
+        backend = getattr(app_state, "memory_backend", None)
+        if backend is not None:
+            return backend
+        if getattr(app_state, "_managed_runtime_stopping", False):
+            return None
+        backend = _resolve_memory_backend(
+            config if config is not None else getattr(app_state, "config", None)
+        )
+        if backend is not None:
+            app_state.memory_backend = backend
+            app_state._owns_memory_backend = True
+        return backend
+
+
+def _mcp_state_lock(app_state: Any, attr: str) -> threading.Lock:
+    """Return a named per-runtime MCP lock, creating it atomically."""
+
+    lock = getattr(app_state, attr, None)
+    if lock is not None:
+        return lock
+    with _MCP_LOCK_SETUP:
+        lock = getattr(app_state, attr, None)
+        if lock is None:
+            lock = threading.Lock()
+            setattr(app_state, attr, lock)
+    return lock
+
+
+def _register_mcp_client(app_state: Any, client: Any) -> bool:
+    """Publish a client before blocking I/O so shutdown can interrupt it."""
+
+    lock = _mcp_state_lock(app_state, "_mcp_clients_lock")
+    with lock:
+        if getattr(app_state, "_managed_runtime_stopping", False):
+            return False
+        clients = getattr(app_state, "_mcp_clients", None)
+        if not isinstance(clients, list):
+            clients = list(clients or [])
+            app_state._mcp_clients = clients
+        clients.append(client)
+        return True
+
+
+def _unregister_mcp_client(app_state: Any, client: Any) -> None:
+    """Remove a client that failed discovery or exposed no usable tools."""
+
+    lock = _mcp_state_lock(app_state, "_mcp_clients_lock")
+    with lock:
+        clients = getattr(app_state, "_mcp_clients", None)
+        if isinstance(clients, list):
+            try:
+                clients.remove(client)
+            except ValueError:
+                pass
 
 
 class _LightweightSystem:
@@ -112,9 +233,7 @@ class _LightweightSystem:
         # The executor injects system.memory_backend into those tools; this
         # facade previously left it None, so they reported "No memory backend
         # configured" even though the backend was configured and active.
-        self.memory_backend = getattr(runtime, "memory_backend", None)
-        if self.memory_backend is None:
-            self.memory_backend = _resolve_memory_backend(config)
+        self.memory_backend = _get_or_create_memory_backend(runtime, config)
         self.channel_backend = None
         self.mcp_tools: list[Any] = []
         self._mcp_clients: list[Any] = []
@@ -437,11 +556,10 @@ def _instantiate_managed_tool(
 ) -> Any:
     """Compatibility adapter for tests and non-managed route callers."""
 
-    memory_backend = getattr(app_state, "memory_backend", None) if app_state else None
-    if memory_backend is None and app_state is not None:
-        config = getattr(app_state, "config", None)
-        if config is not None:
-            memory_backend = _resolve_memory_backend(config)
+    memory_backend = _get_or_create_memory_backend(
+        app_state,
+        getattr(app_state, "config", None) if app_state is not None else None,
+    )
     channel_backend = None
     if app_state is not None:
         channel_backend = getattr(app_state, "channel_backend", None) or getattr(
@@ -501,6 +619,19 @@ def _get_mcp_tools(app_state: Any) -> Tuple[List[Dict[str, Any]], Dict[str, Any]
     Lazily discovers MCP tools from config and caches them on ``app_state``
     so that subsequent requests reuse the same connections.
     """
+    lock = _mcp_state_lock(app_state, "_mcp_discovery_lock")
+    with lock:
+        return _get_mcp_tools_locked(app_state)
+
+
+def _get_mcp_tools_locked(
+    app_state: Any,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Discover MCP tools while the runtime's discovery lock is held."""
+
+    if getattr(app_state, "_managed_runtime_stopping", False):
+        return [], {}
+
     cached = getattr(app_state, "_mcp_tools_cache", None)
     if cached is not None:
         return cached
@@ -546,9 +677,6 @@ def _get_mcp_tools(app_state: Any) -> Tuple[List[Dict[str, Any]], Dict[str, Any]
     from openjarvis.mcp.transport import StdioTransport, StreamableHTTPTransport
     from openjarvis.tools.mcp_adapter import MCPToolProvider
 
-    # Keep clients alive so transports persist for tool calls at runtime
-    mcp_clients: list = getattr(app_state, "_mcp_clients", [])
-
     try:
         server_list = _json.loads(app_config.tools.mcp.servers)
     except (_json.JSONDecodeError, TypeError) as exc:
@@ -581,6 +709,10 @@ def _get_mcp_tools(app_state: Any) -> Tuple[List[Dict[str, Any]], Dict[str, Any]
                 continue
 
             client = MCPClient(transport)
+            if not _register_mcp_client(app_state, client):
+                client.close()
+                client = None
+                break
             client.initialize()
 
             provider = MCPToolProvider(client)
@@ -616,12 +748,10 @@ def _get_mcp_tools(app_state: Any) -> Tuple[List[Dict[str, Any]], Dict[str, Any]
                 )
                 adapters_by_name[spec.name] = adapter
 
-            if staged:
-                mcp_clients.append(client)
-                client = None
-            else:
+            if not staged:
                 client.close()
-                client = None
+                _unregister_mcp_client(app_state, client)
+            client = None
 
             logger.info(
                 "Discovered %d MCP tools from server '%s'",
@@ -634,16 +764,21 @@ def _get_mcp_tools(app_state: Any) -> Tuple[List[Dict[str, Any]], Dict[str, Any]
                     client.close()
                 except Exception:
                     logger.debug("Failed to close unusable MCP client", exc_info=True)
+                else:
+                    _unregister_mcp_client(app_state, client)
             logger.warning(
                 "Failed to discover MCP tools from '%s': %s",
                 name,
                 exc,
             )
 
-    app_state._mcp_clients = mcp_clients
     if openai_tools:
-        app_state._mcp_tools_cache = (openai_tools, adapters_by_name)
-    return openai_tools, adapters_by_name
+        clients_lock = _mcp_state_lock(app_state, "_mcp_clients_lock")
+        with clients_lock:
+            if not getattr(app_state, "_managed_runtime_stopping", False):
+                app_state._mcp_tools_cache = (openai_tools, adapters_by_name)
+                return openai_tools, adapters_by_name
+    return [], {}
 
 
 def _sse_chunk(chunk_id: str, model: str, content: str) -> str:
@@ -762,7 +897,7 @@ async def _stream_managed_agent(
                 exc_info=True,
             )
 
-    memory_backend = getattr(app_state, "memory_backend", None)
+    memory_backend = _get_or_create_memory_backend(app_state, app_config)
     channel_backend = getattr(app_state, "channel_backend", None) or getattr(
         app_state, "channel_bridge", None
     )
@@ -800,7 +935,6 @@ async def _stream_managed_agent(
                 """Run DeepResearchAgent in thread, stream progress + result."""
                 import asyncio
                 import queue
-                import threading
                 import time as _dr_time
 
                 from openjarvis.agents.deep_research import DeepResearchAgent
@@ -937,8 +1071,22 @@ async def _stream_managed_agent(
                         }
                     )
 
-                thread = threading.Thread(target=_run_agent, daemon=True)
-                thread.start()
+                try:
+                    _start_managed_worker(
+                        app_state,
+                        _run_agent,
+                        name=f"managed-agent-deep-research-{agent_id}",
+                    )
+                except Exception as exc:
+                    resolved_toolkit.close()
+                    progress_q.put(
+                        {
+                            "type": "error",
+                            "content": f"Error: {exc}",
+                            "metadata": {},
+                            "elapsed": _dr_time.time() - _dr_start,
+                        }
+                    )
 
                 # Collect tool calls from deep-research so we can persist them
                 # alongside the final response (and the UI can re-render them
@@ -1464,8 +1612,6 @@ def create_agent_manager_router(
 
     @agents_router.post("/{agent_id}/run")
     async def run_agent(agent_id: str, request: Request):
-        import threading
-
         agent = manager.get_agent(agent_id)
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
@@ -1528,7 +1674,18 @@ def create_agent_manager_router(
                     f"ERROR: {exc}",
                 )
 
-        threading.Thread(target=_run_tick, daemon=True).start()
+        try:
+            _start_managed_worker(
+                request.app.state,
+                _run_tick,
+                name=f"managed-agent-run-{agent_id}",
+            )
+        except RuntimeError as exc:
+            try:
+                manager.end_tick(agent_id)
+            except Exception:
+                pass
+            raise HTTPException(status_code=503, detail=str(exc))
         return {"status": "running", "agent_id": agent_id}
 
     # ── Recover ──────────────────────────────────────────────
@@ -1823,7 +1980,6 @@ def create_agent_manager_router(
             # Non-streaming immediate: trigger a background tick so the
             # agent processes the message, then return the stored msg.
             # Re-use the server's existing system (correct model/engine).
-            import threading
             import time as _time
 
             from openjarvis.agents.executor import AgentExecutor
@@ -1883,10 +2039,14 @@ def create_agent_manager_router(
                         f"ERROR: {exc}",
                     )
 
-            threading.Thread(
-                target=_immediate_tick,
-                daemon=True,
-            ).start()
+            try:
+                _start_managed_worker(
+                    request.app.state,
+                    _immediate_tick,
+                    name=f"managed-agent-immediate-{agent_id}",
+                )
+            except RuntimeError as exc:
+                raise HTTPException(status_code=503, detail=str(exc))
             return msg
 
         # --- Streaming mode: run agent and return SSE response ---

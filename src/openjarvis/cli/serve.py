@@ -478,23 +478,24 @@ def serve(
     # Create app
     from openjarvis.server.app import create_app
 
-    # Set up memory backend for context injection. Built before the scheduler
-    # block so the executor's JarvisSystem can reference it (#263).
+    # Set up the memory backend for storage tools, API routes, and optional
+    # prompt-context injection. ``context_from_memory`` controls only the last
+    # of those, so disabling it must not leave explicit memory_* tools with a
+    # null backend. Built before the scheduler so AgentExecutor can reuse it.
     memory_backend = None
-    if config.agent.context_from_memory:
-        try:
-            import openjarvis.tools.storage  # noqa: F401
-            from openjarvis.core.registry import MemoryRegistry
+    try:
+        import openjarvis.tools.storage  # noqa: F401
+        from openjarvis.core.registry import MemoryRegistry
 
-            mem_key = config.memory.default_backend
-            if MemoryRegistry.contains(mem_key):
-                memory_backend = MemoryRegistry.create(
-                    mem_key,
-                    db_path=config.memory.db_path,
-                )
-                console.print("  Memory:    [cyan]active[/cyan]")
-        except Exception as exc:
-            logger.debug("Memory backend init failed: %s", exc)
+        mem_key = config.memory.default_backend
+        if MemoryRegistry.contains(mem_key):
+            memory_backend = MemoryRegistry.create(
+                mem_key,
+                db_path=config.memory.db_path,
+            )
+            console.print("  Memory:    [cyan]active[/cyan]")
+    except Exception as exc:
+        logger.debug("Memory backend init failed: %s", exc)
 
     # Automatic long-term memory service (background fact extraction).
     memory_service = None
@@ -690,6 +691,7 @@ def serve(
         channel_bridge=channel_bridge,
         config=config,
         memory_backend=memory_backend,
+        own_memory_backend=memory_backend is not None,
         memory_service=memory_service,
         speech_backend=speech_backend,
         agent_manager=agent_manager,

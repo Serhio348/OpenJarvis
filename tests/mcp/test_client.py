@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -137,3 +138,69 @@ class TestMCPClient:
             list(pool.map(lambda _: shared_client.list_tools(), range(24)))
 
         assert transport.max_active == 1
+
+    def test_close_interrupts_blocked_request_and_rejects_queued_request(self):
+        """Shutdown reaches the transport without waiting on an in-flight call."""
+
+        class _BlockingTransport:
+            def __init__(self):
+                self.send_started = threading.Event()
+                self.send_released = threading.Event()
+                self.close_called = threading.Event()
+                self.send_count = 0
+
+            def send(self, request):
+                self.send_count += 1
+                self.send_started.set()
+                self.send_released.wait()
+                raise RuntimeError("transport closed")
+
+            def send_notification(self, request):
+                return None
+
+            def close(self):
+                self.close_called.set()
+                self.send_released.set()
+
+        transport = _BlockingTransport()
+        shared_client = MCPClient(transport)
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            blocked_request = pool.submit(shared_client.list_tools)
+            assert transport.send_started.wait(timeout=1)
+
+            queued_request = pool.submit(shared_client.list_tools)
+            close_call = pool.submit(shared_client.close)
+
+            try:
+                close_reached_transport = transport.close_called.wait(timeout=1)
+            finally:
+                # Keep the test failure-safe against a regression that makes
+                # close wait behind the blocked request.
+                transport.send_released.set()
+
+            close_call.result(timeout=1)
+            assert close_reached_transport
+            with pytest.raises(RuntimeError, match="transport closed"):
+                blocked_request.result(timeout=1)
+            with pytest.raises(RuntimeError, match="MCP client is closed"):
+                queued_request.result(timeout=1)
+
+        assert transport.send_count == 1
+
+    def test_close_retries_transport_cleanup_after_failure(self):
+        """A failed close keeps requests blocked but permits cleanup retry."""
+
+        transport = MagicMock()
+        transport.close.side_effect = [RuntimeError("terminate timed out"), None]
+        client = MCPClient(transport)
+
+        with pytest.raises(RuntimeError, match="terminate timed out"):
+            client.close()
+        with pytest.raises(RuntimeError, match="MCP client is closed"):
+            client.list_tools()
+
+        client.close()
+        client.close()
+
+        assert transport.close.call_count == 2

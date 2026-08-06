@@ -74,7 +74,13 @@ class _CollidingMCPTool(BaseTool):
 class _ToolCallingEngine:
     """Advertise the toolkit, request one call, then observe its result."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        tool_name: str = "stateful_probe",
+        arguments: dict | None = None,
+    ) -> None:
+        self.tool_name = tool_name
+        self.arguments = arguments or {"value": "sentinel"}
         self.turns = 0
         self.advertised_specs: list[dict] = []
         self.observed_tool_result = ""
@@ -88,11 +94,11 @@ class _ToolCallingEngine:
                 tool_calls=[
                     {
                         "index": 0,
-                        "id": "call-stateful-probe",
+                        "id": f"call-{self.tool_name}",
                         "type": "function",
                         "function": {
-                            "name": "stateful_probe",
-                            "arguments": json.dumps({"value": "sentinel"}),
+                            "name": self.tool_name,
+                            "arguments": json.dumps(self.arguments),
                         },
                     }
                 ],
@@ -227,3 +233,70 @@ async def test_sse_mcp_opt_out_skips_discovery(monkeypatch) -> None:
         pass
 
     discovery.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sse_memory_tools_resolve_backend_when_context_injection_is_off(
+    monkeypatch,
+) -> None:
+    """Prompt context opt-out must not disable explicit memory tools."""
+
+    from openjarvis.server import agent_manager_routes as routes
+    from openjarvis.tools.storage_tools import MemoryStoreTool
+
+    if not ToolRegistry.contains("memory_store"):
+        ToolRegistry.register_value("memory_store", MemoryStoreTool)
+
+    backend = MagicMock()
+    backend.store.return_value = "doc-1"
+    resolver = MagicMock(return_value=backend)
+    monkeypatch.setattr(routes, "_resolve_memory_backend", resolver)
+
+    manager = MagicMock()
+    manager.list_messages.return_value = []
+    app_config = SimpleNamespace(
+        memory_files=None,
+        system_prompt=None,
+        agent=SimpleNamespace(context_from_memory=False),
+        memory=SimpleNamespace(default_backend="sqlite", db_path="memory.db"),
+    )
+    app_state = SimpleNamespace(
+        config=app_config,
+        memory_backend=None,
+        channel_backend=None,
+        channel_bridge=None,
+        _mcp_clients=[],
+        _mcp_tools_cache=([], {}),
+    )
+    engine = _ToolCallingEngine(
+        tool_name="memory_store",
+        arguments={"content": "remember me"},
+    )
+
+    response = await routes._stream_managed_agent(
+        manager=manager,
+        agent_record={
+            "id": "agent-memory-tool",
+            "name": "Memory Tool Agent",
+            "agent_type": "simple",
+            "config": {
+                "model": "test-model",
+                "max_turns": 3,
+                "tools": ["memory_store"],
+            },
+        },
+        user_content="Remember this",
+        message_id="message-memory-tool",
+        engine=engine,
+        bus=None,
+        app_state=app_state,
+    )
+
+    async for _ in response.body_iterator:
+        pass
+
+    resolver.assert_called_once_with(app_config)
+    assert app_state.memory_backend is backend
+    assert app_state._owns_memory_backend is True
+    backend.store.assert_called_once_with("remember me", source="")
+    assert engine.observed_tool_result == "Stored as doc-1"

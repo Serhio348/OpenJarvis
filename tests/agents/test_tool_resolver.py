@@ -10,6 +10,7 @@ from openjarvis.agents import tool_resolver
 from openjarvis.connectors.store import KnowledgeStore
 from openjarvis.core.registry import ToolRegistry
 from openjarvis.core.types import ToolResult
+from openjarvis.tools import description_loader
 from openjarvis.tools._stubs import BaseTool, ToolSpec
 
 
@@ -148,6 +149,89 @@ def test_configured_tools_normalize_lists_and_comma_separated_strings(
     assert [spec["function"]["name"] for spec in resolved.openai_specs] == [
         "alpha",
         "beta",
+    ]
+
+
+def test_registered_tool_advertisement_matches_to_openai_function(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime description overrides must reach canonical advertisements."""
+
+    ToolRegistry.register_value("alpha", _AlphaTool)
+    monkeypatch.setattr(
+        description_loader,
+        "get_tool_description_override",
+        lambda name: "Runtime alpha description" if name == "alpha" else None,
+    )
+
+    resolved = tool_resolver.resolve_agent_tools(
+        {"agent_type": "simple", "config": {"tools": ["alpha"]}},
+        engine=object(),
+        model="test-model",
+    )
+
+    tool = resolved.by_name["alpha"]
+    assert resolved.openai_specs == [tool.to_openai_function()]
+    assert (
+        resolved.openai_specs[0]["function"]["description"]
+        == "Runtime alpha description"
+    )
+
+
+def test_explicit_config_schema_takes_priority_over_tool_advertisement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ToolRegistry.register_value("alpha", _AlphaTool)
+    monkeypatch.setattr(
+        description_loader,
+        "get_tool_description_override",
+        lambda name: "Runtime alpha description" if name == "alpha" else None,
+    )
+    custom_spec = {
+        "type": "function",
+        "function": {
+            "name": "alpha",
+            "description": "Agent-specific alpha description",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+        },
+    }
+
+    resolved = tool_resolver.resolve_agent_tools(
+        {"agent_type": "simple", "config": {"tools": [custom_spec]}},
+        engine=object(),
+        model="test-model",
+    )
+
+    assert resolved.openai_specs == [custom_spec]
+    assert resolved.by_name["alpha"].to_openai_function() == custom_spec
+
+
+def test_invalid_tool_advertisement_falls_back_to_tool_spec() -> None:
+    class _InvalidAdvertisementTool(_AlphaTool):
+        def to_openai_function(self) -> dict[str, object]:
+            raise RuntimeError("broken advertisement")
+
+    ToolRegistry.register_value("alpha", _InvalidAdvertisementTool)
+
+    resolved = tool_resolver.resolve_agent_tools(
+        {"agent_type": "simple", "config": {"tools": ["alpha"]}},
+        engine=object(),
+        model="test-model",
+    )
+
+    assert resolved.openai_specs == [
+        {
+            "type": "function",
+            "function": {
+                "name": "alpha",
+                "description": "Alpha test tool",
+                "parameters": {},
+            },
+        }
     ]
 
 

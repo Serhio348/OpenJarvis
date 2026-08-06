@@ -14,8 +14,11 @@ from openjarvis.agents.executor import AgentExecutor
 from openjarvis.agents.manager import AgentManager
 from openjarvis.agents.tool_resolver import ResolvedAgentTools
 from openjarvis.connectors.store import KnowledgeStore
+from openjarvis.core.config import MemoryFilesConfig, SystemPromptConfig
 from openjarvis.core.events import EventBus
 from openjarvis.core.registry import AgentRegistry, ToolRegistry
+from openjarvis.core.types import Role, ToolResult
+from openjarvis.tools._stubs import BaseTool, ToolSpec
 from tests.agents.fake_engine import FakeEngine
 from tests.agents.scenario_harness import FakeSystem
 
@@ -40,6 +43,48 @@ class _CapturingToolAgent:
                 query="EXECUTOR_RESOLVER_SENTINEL"
             )
         return AgentResult(content="captured")
+
+
+class _NonToolAgent:
+    """Agent class whose run method must not swallow a configured toolkit."""
+
+    accepts_tools = False
+    supports_managed_tool_fallback = True
+    runs = 0
+
+    def __init__(self, engine, model, **kwargs):
+        pass
+
+    def run(self, input_text, context=None):
+        type(self).runs += 1
+        raise AssertionError("non-tool agent should use the managed tool loop")
+
+
+class _SpecializedNonToolAgent:
+    """Non-tool agent that must retain its specialized execution path."""
+
+    accepts_tools = False
+    runs = 0
+
+    def __init__(self, engine, model, **kwargs):
+        pass
+
+    def run(self, input_text, context=None):
+        type(self).runs += 1
+        return AgentResult(content="specialized response")
+
+
+class _ExecutorProbeTool(BaseTool):
+    tool_id = "executor_probe"
+    calls = 0
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(name=self.tool_id, description="Executor parity probe")
+
+    def execute(self, **params) -> ToolResult:
+        type(self).calls += 1
+        return ToolResult(tool_name=self.tool_id, content="probe-result")
 
 
 def _register_agent():
@@ -135,6 +180,209 @@ def test_executor_handles_string_tools(tmp_path):
     result_agent = mgr.get_agent(agent["id"])
     assert result_agent["status"] == "idle"
     mgr.close()
+
+
+def test_executor_uses_tool_loop_for_non_tool_agent_with_configured_tools(tmp_path):
+    """Immediate/scheduled ticks match SSE instead of discarding tools."""
+
+    AgentRegistry.register_value("non_tool_probe", _NonToolAgent)
+    ToolRegistry.register_value(_ExecutorProbeTool.tool_id, _ExecutorProbeTool)
+    _NonToolAgent.runs = 0
+    _ExecutorProbeTool.calls = 0
+
+    engine = FakeEngine(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call-executor-probe",
+                        "name": _ExecutorProbeTool.tool_id,
+                        "arguments": "{}",
+                    }
+                ]
+            },
+            {"content": "tool-backed final response"},
+        ]
+    )
+    system = FakeSystem(engine=engine)
+    system.config = SimpleNamespace(
+        agent=SimpleNamespace(default_system_prompt="GLOBAL_DEFAULT"),
+        memory_files=MemoryFilesConfig(persona_name="none"),
+        system_prompt=SystemPromptConfig(),
+    )
+    manager = AgentManager(db_path=str(tmp_path / "agents.db"))
+    agent = manager.create_agent(
+        "non-tool with tools",
+        agent_type="non_tool_probe",
+        config={
+            "model": "test-model",
+            "tools": [_ExecutorProbeTool.tool_id],
+            "instruction": "Use the probe.",
+            "system_prompt": "NON_TOOL_SYSTEM_SENTINEL",
+        },
+    )
+
+    try:
+        AgentExecutor(manager, EventBus(), system=system).execute_tick(agent["id"])
+
+        assert _NonToolAgent.runs == 0
+        assert _ExecutorProbeTool.calls == 1
+        assert engine.call_count == 2
+        assert any(
+            message.role is Role.SYSTEM
+            and message.content == "NON_TOOL_SYSTEM_SENTINEL"
+            for message in engine.last_messages or []
+        )
+        refreshed = manager.get_agent(agent["id"])
+        assert refreshed["status"] == "idle"
+        assert refreshed["total_runs"] == 1
+        responses = [
+            message
+            for message in manager.list_messages(agent["id"])
+            if message["direction"] == "agent_to_user"
+        ]
+        assert responses[-1]["content"] == "tool-backed final response"
+        assert responses[-1]["tool_calls"][0]["tool"] == "executor_probe"
+    finally:
+        manager.close()
+
+
+def test_simple_agent_uses_global_mcp_tools_without_native_tool_config(tmp_path):
+    """Fallback-compatible simple agents preserve SSE/global-MCP parity."""
+
+    from openjarvis.agents.simple import SimpleAgent
+
+    AgentRegistry.register_value("simple", SimpleAgent)
+    _ExecutorProbeTool.calls = 0
+    provider = MagicMock(return_value=([_ExecutorProbeTool()], []))
+    engine = FakeEngine(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call-global-mcp-probe",
+                        "name": _ExecutorProbeTool.tool_id,
+                        "arguments": "{}",
+                    }
+                ]
+            },
+            {"content": "global MCP response"},
+        ]
+    )
+    system = SimpleNamespace(
+        engine=engine,
+        model="test-model",
+        config=None,
+        memory_backend=None,
+        channel_backend=None,
+        session_store=None,
+        knowledge_db_path=None,
+        get_managed_agent_mcp_tools=provider,
+    )
+    manager = AgentManager(db_path=str(tmp_path / "agents.db"))
+    agent = manager.create_agent(
+        "simple global MCP",
+        agent_type="simple",
+        config={"model": "test-model", "instruction": "Use MCP."},
+    )
+
+    try:
+        AgentExecutor(manager, EventBus(), system=system).execute_tick(agent["id"])
+
+        provider.assert_called_once_with()
+        assert _ExecutorProbeTool.calls == 1
+        assert engine.call_count == 2
+        responses = [
+            message
+            for message in manager.list_messages(agent["id"])
+            if message["direction"] == "agent_to_user"
+        ]
+        assert responses[-1]["content"] == "global MCP response"
+    finally:
+        manager.close()
+
+
+def test_simple_agent_without_tools_keeps_its_custom_system_prompt(tmp_path):
+    """Signature filtering must not discard prompt-builder state on retry."""
+
+    from openjarvis.agents.simple import SimpleAgent
+
+    AgentRegistry.register_value("simple", SimpleAgent)
+    engine = FakeEngine([{"content": "custom prompt response"}])
+    system = FakeSystem(engine=engine)
+    system.config = SimpleNamespace(
+        agent=SimpleNamespace(default_system_prompt="GLOBAL_DEFAULT"),
+        memory_files=MemoryFilesConfig(persona_name="none"),
+        system_prompt=SystemPromptConfig(),
+    )
+    manager = AgentManager(db_path=str(tmp_path / "agents.db"))
+    agent = manager.create_agent(
+        "simple custom prompt",
+        agent_type="simple",
+        config={
+            "model": "test-model",
+            "instruction": "Answer directly.",
+            "system_prompt": "SIMPLE_CUSTOM_SYSTEM_SENTINEL",
+            "mcp_tools": False,
+        },
+    )
+
+    try:
+        AgentExecutor(manager, EventBus(), system=system).execute_tick(agent["id"])
+
+        assert engine.call_count == 1
+        assert any(
+            message.role is Role.SYSTEM
+            and message.content == "SIMPLE_CUSTOM_SYSTEM_SENTINEL"
+            for message in engine.last_messages or []
+        )
+    finally:
+        manager.close()
+
+
+def test_specialized_non_tool_agent_is_not_replaced_by_generic_tool_loop(tmp_path):
+    """Configured/global tools never replace a non-opted-in agent class."""
+
+    AgentRegistry.register_value("specialized_non_tool", _SpecializedNonToolAgent)
+    ToolRegistry.register_value(_ExecutorProbeTool.tool_id, _ExecutorProbeTool)
+    _SpecializedNonToolAgent.runs = 0
+    _ExecutorProbeTool.calls = 0
+    provider = MagicMock(return_value=([_ExecutorProbeTool()], []))
+    system = SimpleNamespace(
+        engine=FakeEngine([{"content": "unused"}]),
+        model="test-model",
+        config=None,
+        memory_backend=None,
+        channel_backend=None,
+        session_store=None,
+        knowledge_db_path=None,
+        get_managed_agent_mcp_tools=provider,
+    )
+    manager = AgentManager(db_path=str(tmp_path / "agents.db"))
+    agent = manager.create_agent(
+        "specialized with configured tool",
+        agent_type="specialized_non_tool",
+        config={
+            "model": "test-model",
+            "instruction": "Keep the specialized path.",
+            "tools": [_ExecutorProbeTool.tool_id],
+        },
+    )
+
+    try:
+        AgentExecutor(manager, EventBus(), system=system).execute_tick(agent["id"])
+
+        provider.assert_not_called()
+        assert _SpecializedNonToolAgent.runs == 1
+        assert _ExecutorProbeTool.calls == 0
+        responses = [
+            message
+            for message in manager.list_messages(agent["id"])
+            if message["direction"] == "agent_to_user"
+        ]
+        assert responses[-1]["content"] == "specialized response"
+    finally:
+        manager.close()
 
 
 def test_executor_grants_deep_research_live_knowledge_tools(tmp_path):

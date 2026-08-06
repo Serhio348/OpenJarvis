@@ -61,7 +61,6 @@ class JarvisSystem:
     agent: Optional[BaseAgent] = None
     agent_name: str = ""
     tools: List[BaseTool] = field(default_factory=list)
-    mcp_tools: List[BaseTool] = field(default_factory=list)
     tool_executor: Optional[ToolExecutor] = None
     memory_backend: Optional[MemoryBackend] = None
     channel_backend: Optional[BaseChannel] = None
@@ -87,6 +86,9 @@ class JarvisSystem:
     skill_manager: Optional[SkillManager] = None
     _learning_orchestrator: Optional[LearningOrchestrator] = None
     _mcp_clients: List[MCPClient] = field(default_factory=list)
+    # Keep newly added fields after every pre-existing positional field so
+    # older positional JarvisSystem(...) calls retain their original meaning.
+    mcp_tools: List[BaseTool] = field(default_factory=list)
 
     @property
     def security(self) -> SecurityContext:

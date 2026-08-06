@@ -114,6 +114,33 @@ class SystemBuilder:
 
     def build(self) -> JarvisSystem:
         """Construct a fully wired JarvisSystem."""
+        # Discovery state belongs to one build only.  Once a system is
+        # returned, that system owns the clients and adapters captured below;
+        # retaining them here would make a reused builder hand closed clients
+        # from an earlier system to the next one.
+        self._clear_mcp_discovery_state(close_clients=True)
+        try:
+            system = self._build()
+        except BaseException:
+            # No system took ownership, so release any clients opened before
+            # the build failed.
+            self._clear_mcp_discovery_state(close_clients=True)
+            raise
+        self._clear_mcp_discovery_state(close_clients=False)
+        return system
+
+    def _clear_mcp_discovery_state(self, *, close_clients: bool) -> None:
+        if close_clients:
+            for client in getattr(self, "_mcp_clients", []):
+                try:
+                    client.close()
+                except Exception:
+                    logger.debug("Error closing unowned MCP client", exc_info=True)
+        self._mcp_clients = []
+        self._mcp_tools = []
+
+    def _build(self) -> JarvisSystem:
+        """Build one system using fresh, build-local MCP discovery state."""
         config = self._config
         bus = self._bus or get_event_bus()
 

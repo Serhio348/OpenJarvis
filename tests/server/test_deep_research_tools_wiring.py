@@ -143,10 +143,14 @@ def test_deep_research_tools_returns_empty_when_no_db() -> None:
 async def test_server_deep_research_merges_and_executes_all_tool_sources(
     tmp_path: Path,
     with_knowledge_db: bool,
+    monkeypatch,
 ) -> None:
     """Configured and MCP tools reach Deep Research with or without its DB."""
 
-    from openjarvis.server.agent_manager_routes import _stream_managed_agent
+    from openjarvis.server import agent_manager_routes as routes
+
+    start_worker = MagicMock(wraps=routes._start_managed_worker)
+    monkeypatch.setattr(routes, "_start_managed_worker", start_worker)
 
     db_path = tmp_path / "knowledge.db"
     if with_knowledge_db:
@@ -178,7 +182,7 @@ async def test_server_deep_research_merges_and_executes_all_tool_sources(
     manager.list_messages.return_value = []
     engine = _ScriptedDeepResearchEngine()
 
-    response = await _stream_managed_agent(
+    response = await routes._stream_managed_agent(
         manager=manager,
         agent_record={
             "id": "agent-deep-research-682",
@@ -222,6 +226,11 @@ async def test_server_deep_research_merges_and_executes_all_tool_sources(
     assert _ConfiguredResearchProbe.calls == 1
     assert engine.observed_tool_result == "configured:sentinel"
     assert "data: [DONE]" in "".join(body_parts)
+    start_worker.assert_called_once()
+    assert start_worker.call_args.kwargs["name"].startswith(
+        "managed-agent-deep-research-"
+    )
+    assert app_state._managed_workers == set()
 
     manager.store_agent_response.assert_called_once()
     stored = manager.store_agent_response.call_args

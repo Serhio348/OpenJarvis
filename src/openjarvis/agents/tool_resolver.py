@@ -76,6 +76,26 @@ def _spec_name(spec: Mapping[str, Any]) -> str:
 
 
 def _openai_spec(tool: Any) -> dict[str, Any]:
+    to_openai_function = getattr(tool, "to_openai_function", None)
+    if callable(to_openai_function):
+        try:
+            advertised = to_openai_function()
+        except Exception:
+            logger.debug(
+                "Failed to build advertised schema for tool %r; falling back "
+                "to its ToolSpec",
+                _tool_name(tool),
+                exc_info=True,
+            )
+        else:
+            if isinstance(advertised, Mapping) and _spec_name(advertised):
+                return dict(advertised)
+            logger.debug(
+                "Tool %r returned an invalid advertised schema; falling back "
+                "to its ToolSpec",
+                _tool_name(tool),
+            )
+
     spec = tool.spec
     return {
         "type": "function",

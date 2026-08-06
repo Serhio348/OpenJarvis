@@ -244,6 +244,70 @@ def test_builder_global_mcp_disable_prevents_discovery() -> None:
     assert builder._mcp_tools == []
 
 
+def test_reused_builder_transfers_only_current_build_mcp_state() -> None:
+    """Each built system exclusively owns its own MCP clients and tools."""
+
+    from openjarvis.core.config import JarvisConfig
+    from openjarvis.system import SystemBuilder
+
+    config = JarvisConfig()
+    config.telemetry.enabled = False
+    config.traces.enabled = False
+    config.skills.enabled = False
+    config.agent_manager.enabled = False
+    config.tools.mcp.servers = json.dumps(
+        [{"name": "test", "url": "http://localhost:8080/mcp"}]
+    )
+
+    engine = MagicMock(spec=["health", "can_serve", "generate", "list_models", "close"])
+    engine.health.return_value = True
+    first_tool = _make_mock_tool("first_mcp_tool")
+    second_tool = _make_mock_tool("second_mcp_tool")
+    first_client = MagicMock()
+    second_client = MagicMock()
+    discoveries = iter([(first_tool, first_client), (second_tool, second_client)])
+
+    builder = (
+        SystemBuilder(config)
+        .engine_instance(engine)
+        .model("test-model")
+        .tools([])
+        .telemetry(False)
+        .traces(False)
+        .speech(False)
+    )
+
+    def _discover(_server_cfg):
+        tool, client = next(discoveries)
+        builder._mcp_clients.append(client)
+        return [tool]
+
+    with (
+        patch.object(builder, "_discover_external_mcp", side_effect=_discover),
+        patch.object(builder, "_resolve_memory", return_value=None),
+    ):
+        first_system = builder.build()
+        assert first_system.mcp_tools == [first_tool]
+        assert first_system._mcp_clients == [first_client]
+        assert builder._mcp_tools == []
+        assert builder._mcp_clients == []
+        first_system.close()
+
+        second_system = builder.build()
+
+    try:
+        assert second_system.mcp_tools == [second_tool]
+        assert second_system._mcp_clients == [second_client]
+        assert first_client not in second_system._mcp_clients
+        assert builder._mcp_tools == []
+        assert builder._mcp_clients == []
+    finally:
+        second_system.close()
+
+    first_client.close.assert_called_once()
+    second_client.close.assert_called_once()
+
+
 class TestStringConfig:
     @patch(_PATCH_PROVIDER)
     @patch(_PATCH_CLIENT)

@@ -279,6 +279,10 @@ class AgentExecutor:
             raise FatalError(f"Unknown agent type: {agent_type}")
 
         config = agent.get("config", {})
+        agent_accepts_tools = bool(getattr(agent_cls, "accepts_tools", False))
+        supports_tool_fallback = bool(
+            getattr(agent_cls, "supports_managed_tool_fallback", False)
+        )
 
         # Resolve engine + model from JarvisSystem
         engine = self._system.engine if self._system else None
@@ -324,7 +328,11 @@ class AgentExecutor:
 
         mcp_tools: list[Any] = []
         mcp_clients: list[Any] = []
-        if config.get("mcp_tools", True) is not False and self._system is not None:
+        if (
+            config.get("mcp_tools", True) is not False
+            and self._system is not None
+            and (agent_accepts_tools or supports_tool_fallback)
+        ):
             provider = getattr(
                 self._system,
                 "get_managed_agent_mcp_tools",
@@ -378,12 +386,28 @@ class AgentExecutor:
             ", ".join(resolved_toolkit.by_name) or "none",
         )
 
+        execution_agent_cls = agent_cls
+        if tool_instances and not agent_accepts_tools and supports_tool_fallback:
+            # Managed SSE already runs configured tools through a native
+            # function-calling loop regardless of the selected class. Use the
+            # same capability for immediate/scheduled ticks instead of
+            # silently discarding the resolved toolkit for SimpleAgent and
+            # other explicitly compatible non-tool classes.
+            from openjarvis.agents.orchestrator import OrchestratorAgent
+
+            execution_agent_cls = OrchestratorAgent
+            logger.info(
+                "Agent %s: %s does not accept tools; using %s for this "
+                "tool-enabled tick",
+                agent["name"],
+                agent_cls.__name__,
+                execution_agent_cls.__name__,
+            )
+
         # Construct agent instance
         agent_kwargs: dict[str, Any] = {}
         sys_prompt = config.get("system_prompt")
-        if sys_prompt is not None:
-            agent_kwargs["system_prompt"] = sys_prompt
-        if getattr(agent_cls, "accepts_tools", False) and tool_instances:
+        if getattr(execution_agent_cls, "accepts_tools", False) and tool_instances:
             agent_kwargs["tools"] = tool_instances
         # Hand the agent our EventBus so its ToolExecutor can publish
         # TOOL_CALL_START/END — without this, ToolExecutor's ``self._bus``
@@ -405,7 +429,7 @@ class AgentExecutor:
         # recall / persistence paths.
         import inspect
 
-        init_sig = inspect.signature(agent_cls.__init__)
+        init_sig = inspect.signature(execution_agent_cls.__init__)
         accepts_var_kw = any(
             p.kind == inspect.Parameter.VAR_KEYWORD
             for p in init_sig.parameters.values()
@@ -413,6 +437,16 @@ class AgentExecutor:
 
         def _accepts(name: str) -> bool:
             return accepts_var_kw or name in init_sig.parameters
+
+        # Unsupported kwargs used to trigger the broad TypeError fallback
+        # below, which retried with a bare constructor and silently discarded
+        # valid prompt/state wiring. Filter by the selected class's signature
+        # before construction instead.
+        if sys_prompt is not None and _accepts("system_prompt"):
+            agent_kwargs["system_prompt"] = sys_prompt
+        agent_kwargs = {
+            name: value for name, value in agent_kwargs.items() if _accepts(name)
+        }
 
         state_kwargs: dict[str, Any] = {}
         if _accepts("operator_id"):
@@ -430,19 +464,29 @@ class AgentExecutor:
             # agents, mirroring the one-shot `jarvis ask` path so they no
             # longer apply to CLI calls only (#376).
             cfg = getattr(self._system, "config", None)
-            if cfg is not None and _accepts("prompt_builder"):
+            if _accepts("prompt_builder") and (
+                cfg is not None or sys_prompt is not None
+            ):
                 from openjarvis.prompt.builder import SystemPromptBuilder
 
                 state_kwargs["prompt_builder"] = SystemPromptBuilder(
-                    agent_template=getattr(cfg.agent, "default_system_prompt", "")
-                    or "",
-                    memory_files_config=cfg.memory_files,
-                    system_prompt_config=cfg.system_prompt,
+                    agent_template=(
+                        sys_prompt
+                        if sys_prompt is not None
+                        else getattr(
+                            getattr(cfg, "agent", None),
+                            "default_system_prompt",
+                            "",
+                        )
+                        or ""
+                    ),
+                    memory_files_config=getattr(cfg, "memory_files", None),
+                    system_prompt_config=getattr(cfg, "system_prompt", None),
                 )
 
         try:
             try:
-                agent_instance = agent_cls(
+                agent_instance = execution_agent_cls(
                     engine,
                     model,
                     **agent_kwargs,
@@ -450,9 +494,13 @@ class AgentExecutor:
                 )
             except TypeError:
                 try:
-                    agent_instance = agent_cls(engine, model, **agent_kwargs)
+                    agent_instance = execution_agent_cls(
+                        engine,
+                        model,
+                        **agent_kwargs,
+                    )
                 except TypeError:
-                    agent_instance = agent_cls(engine, model)
+                    agent_instance = execution_agent_cls(engine, model)
         except Exception:
             resolved_toolkit.close()
             raise
@@ -474,7 +522,7 @@ class AgentExecutor:
             agent["name"],
             len(tool_instances),
             ", ".join(t.spec.name for t in tool_instances) or "none",
-            agent_cls.__name__,
+            execution_agent_cls.__name__,
         )
 
         # Build input from instruction + summary_memory + pending messages.
