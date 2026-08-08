@@ -203,8 +203,7 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
         # `request_body.tools`, ran the agent's own tool loop, and
         # word-split generic filler content into fake token deltas, so the
         # caller's tool_calls were dropped entirely (the streaming analog of
-        # #414).  For plain chat (no tools), stream token-by-token directly
-        # from the engine for true real-time output.
+        # #414).
         if request_body.tools:
             return await _handle_stream_tools(
                 engine,
@@ -215,6 +214,14 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
                 bus=getattr(request.app.state, "bus", None),
                 memory_service=getattr(request.app.state, "memory_service", None),
             )
+        # Browser/desktop chat sends stream=true without tools. Prefer the
+        # configured agent so orchestrator can actually execute tools
+        # (file_read, shell_exec, …) instead of only advising the user.
+        bus = getattr(request.app.state, "bus", None)
+        if agent is not None and bus is not None:
+            from openjarvis.server.stream_bridge import create_agent_stream
+
+            return await create_agent_stream(agent, bus, model, request_body)
         return await _handle_stream(
             engine,
             model,
@@ -222,7 +229,7 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
             complexity_info,
             trace_store=getattr(request.app.state, "trace_store", None),
             app_config=config,
-            bus=getattr(request.app.state, "bus", None),
+            bus=bus,
             memory_service=getattr(request.app.state, "memory_service", None),
         )
 

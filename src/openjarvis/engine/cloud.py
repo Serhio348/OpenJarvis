@@ -1053,12 +1053,21 @@ class CloudEngine(InferenceEngine):
                 "DeepSeek client not available — set DEEPSEEK_API_KEY"
             )
         kwargs.pop("response_format", None)
+        # Forward OpenAI-compatible tool-calling fields. Without this the
+        # orchestrator never receives tool_calls from DeepSeek (tools were
+        # silently dropped), so the UI only got advice instead of actions.
+        tools = kwargs.pop("tools", None)
+        tool_choice = kwargs.pop("tool_choice", None)
         create_kwargs: Dict[str, Any] = {
             "model": model,
             "messages": messages_to_dicts(messages),
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
+        if tools:
+            create_kwargs["tools"] = tools
+        if tool_choice is not None:
+            create_kwargs["tool_choice"] = tool_choice
         t0 = time.monotonic()
         resp = self._deepseek_client.chat.completions.create(**create_kwargs)
         elapsed = time.monotonic() - t0

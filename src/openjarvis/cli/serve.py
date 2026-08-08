@@ -302,7 +302,9 @@ def serve(
                     from openjarvis.tools._stubs import BaseTool
 
                     _DEFAULT_TOOLS = {"think", "calculator", "web_search"}
-                    configured = config.agent.tools
+                    # Prefer [tools].enabled (example configs / code-assistant),
+                    # fall back to [agent].tools, then safe defaults.
+                    configured = config.tools.enabled or config.agent.tools
                     if configured:
                         if isinstance(configured, list):
                             allowed = {
@@ -351,6 +353,19 @@ def serve(
 
                 if getattr(agent_cls, "accepts_tools", False):
                     agent_kwargs["max_turns"] = config.agent.max_turns
+
+                # Prefer inline system_prompt from config when the agent accepts it.
+                _sys = (config.agent.system_prompt or "").strip()
+                if _sys:
+                    try:
+                        import inspect
+
+                        if "system_prompt" in inspect.signature(
+                            agent_cls.__init__
+                        ).parameters:
+                            agent_kwargs["system_prompt"] = _sys
+                    except Exception:
+                        pass
 
                 agent = agent_cls(engine, model_name, **agent_kwargs)
                 # Pin MCP transports to the agent's lifetime so HTTP
@@ -406,7 +421,7 @@ def serve(
                         from openjarvis.tools._stubs import BaseTool
 
                         _DEFAULT_TOOLS = {"think", "calculator", "web_search"}
-                        configured = config.agent.tools
+                        configured = config.tools.enabled or config.agent.tools
                         if configured:
                             if isinstance(configured, list):
                                 _allowed = {
