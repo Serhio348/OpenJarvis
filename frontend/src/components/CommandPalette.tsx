@@ -71,6 +71,15 @@ const CLOUD_PROVIDERS: CloudProvider[] = [
       { id: 'openrouter/deepseek/deepseek-r1', desc: 'DeepSeek R1 via OpenRouter' },
     ],
   },
+  {
+    name: 'DeepSeek',
+    envKey: 'DEEPSEEK_API_KEY',
+    models: [
+      { id: 'deepseek-v4-flash', desc: 'DeepSeek V4 Flash — fast, cheap' },
+      { id: 'deepseek-v4-pro', desc: 'DeepSeek V4 Pro — higher quality' },
+      { id: 'deepseek-chat', desc: 'DeepSeek Chat — classic API model' },
+    ],
+  },
 ];
 
 type Tab = 'installed' | 'catalogue' | 'cloud';
@@ -78,7 +87,9 @@ type Tab = 'installed' | 'catalogue' | 'cloud';
 export function CommandPalette() {
   const [query, setQuery] = useState('');
   const [selectedIdx, setSelectedIdx] = useState(0);
-  const [tab, setTab] = useState<Tab>('installed');
+  const [tab, setTab] = useState<Tab>(() =>
+    useAppStore.getState().models.length === 0 ? 'cloud' : 'installed',
+  );
   const [pulling, setPulling] = useState<string | null>(null);
   const [pullError, setPullError] = useState<string | null>(null);
   const [pullSuccess, setPullSuccess] = useState<string | null>(null);
@@ -101,17 +112,13 @@ export function CommandPalette() {
   const desktopKeyStorage = isTauri();
 
   const refreshCloudKeyStatus = useCallback(async () => {
-    if (!desktopKeyStorage) {
-      setCloudKeyStatus({});
-      return;
-    }
     try {
       setCloudKeyStatus(await getCloudKeyStatus());
       setCloudKeyError(null);
     } catch (e: any) {
       setCloudKeyError(e?.message || 'Failed to read cloud key status');
     }
-  }, [desktopKeyStorage]);
+  }, []);
 
   const filtered = tab === 'installed'
     ? (query

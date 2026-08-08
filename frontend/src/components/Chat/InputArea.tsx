@@ -121,11 +121,12 @@ export function InputArea() {
     prevModelRef.current = selectedModel;
   }, [selectedModel, streamState.isStreaming, resetStream]);
 
-  const micDisabled = !speechEnabled || !speechAvailable || streamState.isStreaming;
+  // Allow click even if health was stale on first load — startRecording re-checks backend.
+  const micDisabled = !speechEnabled || streamState.isStreaming;
   const micReason: 'not-enabled' | 'no-backend' | 'streaming' | undefined =
     !speechEnabled ? 'not-enabled'
-    : !speechAvailable ? 'no-backend'
     : streamState.isStreaming ? 'streaming'
+    : !speechAvailable ? 'no-backend'
     : undefined;
 
   useEffect(() => {

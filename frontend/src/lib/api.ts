@@ -16,14 +16,19 @@ export const isTauri = () => typeof window !== 'undefined' && !!window.__TAURI_I
 export type CloudKeyStatus = Record<string, boolean>;
 
 export async function getCloudKeyStatus(): Promise<CloudKeyStatus> {
-  if (!isTauri()) return {};
-  try {
-    const { invoke } = await import('@tauri-apps/api/core');
-    const rows = await invoke<Array<{ key: string; set: boolean }>>('get_cloud_key_status');
-    return Object.fromEntries(rows.map((row) => [row.key, row.set]));
-  } catch (e: any) {
-    throw new Error(e?.message ?? e ?? 'Failed to read cloud key status');
+  if (isTauri()) {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const rows = await invoke<Array<{ key: string; set: boolean }>>('get_cloud_key_status');
+      return Object.fromEntries(rows.map((row) => [row.key, row.set]));
+    } catch (e: any) {
+      throw new Error(e?.message ?? e ?? 'Failed to read cloud key status');
+    }
   }
+  // Browser / vite-dev: ask the local server which env keys are present
+  const res = await apiFetch(`/v1/cloud/keys`);
+  if (!res.ok) throw new Error(`Failed to fetch cloud key status: ${res.status}`);
+  return res.json();
 }
 
 export async function saveCloudKey(keyName: string, keyValue: string): Promise<void> {

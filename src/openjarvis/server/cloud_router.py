@@ -27,6 +27,7 @@ _OPENAI_PREFIXES = ("gpt-", "o1-", "o3-", "o4-", "chatgpt-")
 _ANTHROPIC_PREFIXES = ("claude-",)
 _GOOGLE_PREFIXES = ("gemini-",)
 _MINIMAX_PREFIXES = ("MiniMax-",)
+_DEEPSEEK_PREFIXES = ("deepseek",)
 
 # HuggingFace orgs that host local-only quantised models — never route to cloud.
 _LOCAL_HF_ORGS = (
@@ -55,11 +56,27 @@ def _load_keys() -> dict[str, str]:
         "GOOGLE_API_KEY",
         "OPENROUTER_API_KEY",
         "MINIMAX_API_KEY",
+        "DEEPSEEK_API_KEY",
     ):
         val = os.environ.get(name)
         if val:
             keys[name] = val
     return keys
+
+
+def cloud_key_status() -> dict[str, bool]:
+    """Return which cloud API keys are configured (values never exposed)."""
+    keys = _load_keys()
+    names = (
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "OPENROUTER_API_KEY",
+        "MINIMAX_API_KEY",
+        "DEEPSEEK_API_KEY",
+    )
+    return {name: bool(keys.get(name)) for name in names}
 
 
 def get_provider(model: str) -> str | None:
@@ -72,6 +89,9 @@ def get_provider(model: str) -> str | None:
         return "google"
     if any(model.startswith(p) for p in _MINIMAX_PREFIXES):
         return "minimax"
+    # deepseek-chat, deepseek-v4-flash, deepseek-reasoner, …
+    if model.lower().startswith(_DEEPSEEK_PREFIXES):
+        return "deepseek"
     if any(model.startswith(org) for org in _LOCAL_HF_ORGS):
         return None  # local model, never route to cloud
     if "/" in model:  # openrouter format: "meta-llama/llama-3-8b"
@@ -392,6 +412,21 @@ async def stream_cloud(
             max_tokens,
             base_url="https://api.minimax.io/v1",
             api_key_name="MINIMAX_API_KEY",
+        ):
+            yield token
+
+    elif provider == "deepseek":
+        keys = _load_keys()
+        api_key = keys.get("DEEPSEEK_API_KEY", "")
+        if not api_key:
+            raise ValueError("DEEPSEEK_API_KEY not set — add it in the Cloud Models tab")
+        async for token in _stream_openai(
+            model,
+            messages,
+            temperature,
+            max_tokens,
+            base_url="https://api.deepseek.com/v1",
+            api_key_name="DEEPSEEK_API_KEY",
         ):
             yield token
 

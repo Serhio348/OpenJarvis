@@ -931,6 +931,14 @@ async def delete_model(model_name: str, request: Request):
     return {"status": "deleted", "model": model_name}
 
 
+@router.get("/v1/cloud/keys")
+async def list_cloud_key_status() -> dict[str, bool]:
+    """Return which cloud API keys are configured (booleans only, no secrets)."""
+    from openjarvis.server.cloud_router import cloud_key_status
+
+    return cloud_key_status()
+
+
 @router.post("/v1/cloud/reload")
 async def reload_cloud_engine(request: Request):
     """Hot-reload cloud API keys and (re-)initialize the cloud engine.

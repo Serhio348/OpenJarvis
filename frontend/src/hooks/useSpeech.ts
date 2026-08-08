@@ -11,12 +11,43 @@ export function useSpeech() {
   const chunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
 
-  // Check if speech backend is available on mount
-  useEffect(() => {
-    fetchSpeechHealth()
-      .then((health) => setAvailable(health.available))
-      .catch(() => setAvailable(false));
+  const checkHealth = useCallback(async (): Promise<boolean> => {
+    try {
+      const health = await fetchSpeechHealth();
+      setAvailable(health.available);
+      return health.available;
+    } catch {
+      setAvailable(false);
+      return false;
+    }
   }, []);
+
+  // Check on mount; retry while unavailable (Whisper model may still be loading)
+  useEffect(() => {
+    let cancelled = false;
+    let attempts = 0;
+
+    const poll = async () => {
+      if (cancelled) return;
+      const ok = await checkHealth();
+      attempts += 1;
+      if (!ok && attempts < 12) {
+        window.setTimeout(poll, 5000);
+      }
+    };
+
+    void poll();
+
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void checkHealth();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+
+    return () => {
+      cancelled = true;
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [checkHealth]);
 
   const startRecording = useCallback(async (): Promise<void> => {
     setError(null);
@@ -26,11 +57,25 @@ export function useSpeech() {
       return;
     }
 
+    // Re-check backend right before recording (avoids stale "unavailable" after first load)
+    const ok = available || (await checkHealth());
+    if (!ok) {
+      setError('Speech backend not available — wait a few seconds and try again');
+      return;
+    }
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
 
-      const recorder = new MediaRecorder(stream);
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : MediaRecorder.isTypeSupported('audio/webm')
+          ? 'audio/webm'
+          : undefined;
+      const recorder = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream);
       chunksRef.current = [];
 
       recorder.ondataavailable = (e) => {
@@ -41,10 +86,10 @@ export function useSpeech() {
       mediaRecorderRef.current = recorder;
       setState('recording');
     } catch (err) {
-      setError('Microphone access denied');
+      setError('Microphone access denied — allow mic in the browser address bar');
       setState('idle');
     }
-  }, []);
+  }, [available, checkHealth]);
 
   const stopRecording = useCallback(async (): Promise<string> => {
     return new Promise((resolve, reject) => {
