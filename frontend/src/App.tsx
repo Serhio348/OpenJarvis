@@ -12,7 +12,15 @@ import { CommandPalette } from './components/CommandPalette';
 import { SetupScreen } from './components/SetupScreen';
 import { Toaster } from './components/ui/sonner';
 import { useAppStore } from './lib/store';
-import { fetchModels, fetchServerInfo, fetchSavings, submitSavings, isTauri } from './lib/api';
+import {
+  fetchModels,
+  fetchServerInfo,
+  fetchSavings,
+  submitSavings,
+  getCloudKeyStatus,
+  isTauri,
+} from './lib/api';
+import type { ModelInfo } from './types';
 import { OptInModal } from './components/OptInModal';
 import { UpdateChecker } from './components/Desktop/UpdateChecker';
 import { track, hashId } from './lib/analytics';
@@ -65,20 +73,54 @@ export default function App() {
     return () => clearInterval(interval);
   }, [importOverlay]);
 
-  // Fetch models on mount
+  // Fetch models + server defaults on mount.
+  // Cloud-only setups (e.g. DeepSeek) return an empty /v1/models list — inject
+  // configured cloud models and auto-select server default from /v1/info.
   useEffect(() => {
-    fetchModels()
-      .then((m) => {
-        setModels(m);
-        if (!selectedModel && m.length > 0) setSelectedModel(m[0].id);
-      })
-      .catch(() => setModels([]))
-      .finally(() => setModelsLoading(false));
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    const deepseekModels: ModelInfo[] = [
+      { id: 'deepseek-v4-flash', object: 'model', created: 0, owned_by: 'deepseek' },
+      { id: 'deepseek-v4-pro', object: 'model', created: 0, owned_by: 'deepseek' },
+      { id: 'deepseek-chat', object: 'model', created: 0, owned_by: 'deepseek' },
+    ];
 
-  // Fetch server info
-  useEffect(() => {
-    fetchServerInfo().then(setServerInfo).catch(() => {});
+    Promise.all([
+      fetchModels().catch(() => [] as ModelInfo[]),
+      fetchServerInfo().catch(() => null),
+      getCloudKeyStatus().catch(() => ({} as Record<string, boolean>)),
+    ])
+      .then(([localModels, info, keys]) => {
+        if (info) setServerInfo(info);
+
+        const cloudExtras: ModelInfo[] = [];
+        if (keys.DEEPSEEK_API_KEY) cloudExtras.push(...deepseekModels);
+
+        const byId = new Map<string, ModelInfo>();
+        for (const model of [...localModels, ...cloudExtras]) {
+          byId.set(model.id, model);
+        }
+        // Ensure the server's configured default is selectable even if keys
+        // endpoint lagged — /v1/info already knows deepseek-v4-flash.
+        if (info?.model && !byId.has(info.model)) {
+          byId.set(info.model, {
+            id: info.model,
+            object: 'model',
+            created: 0,
+            owned_by: 'cloud',
+          });
+        }
+
+        const merged = Array.from(byId.values());
+        setModels(merged);
+
+        if (!useAppStore.getState().selectedModel) {
+          const preferred =
+            (info?.model && byId.has(info.model) ? info.model : '') ||
+            merged[0]?.id ||
+            '';
+          if (preferred) setSelectedModel(preferred);
+        }
+      })
+      .finally(() => setModelsLoading(false));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Poll savings and optionally share to Supabase
