@@ -367,6 +367,14 @@ def serve(
                     except Exception:
                         pass
 
+                # Desktop/API serve has no TTY confirm prompt. When the user
+                # disables enforce_tool_confirmation (personal profile),
+                # auto-approve tools that declare requires_confirmation
+                # (shell_exec, git_commit, …); otherwise they always fail.
+                if not getattr(config.security, "enforce_tool_confirmation", True):
+                    agent_kwargs["interactive"] = True
+                    agent_kwargs["confirm_callback"] = lambda _prompt: True
+
                 agent = agent_cls(engine, model_name, **agent_kwargs)
                 # Pin MCP transports to the agent's lifetime so HTTP
                 # connections don't close mid-request (#461).
