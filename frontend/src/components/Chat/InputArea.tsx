@@ -97,13 +97,20 @@ export function InputArea() {
   const setDeepResearch = useAppStore((s) => s.setDeepResearch);
   const corpusSync = useResearchCorpusSync(deepResearch);
 
+  // Filled after sendMessage is defined — silence auto-stop calls this.
+  const sendVoiceRef = useRef<(text: string) => void>(() => undefined);
+
   const {
     state: speechState,
     error: speechError,
     available: speechAvailable,
     startRecording,
     stopRecording,
-  } = useSpeech();
+  } = useSpeech({
+    onAutoTranscript: (text) => {
+      if (text) sendVoiceRef.current(text);
+    },
+  });
 
   // Abort in-flight stream when the user switches models mid-generation.
   // This prevents errors from trying to continue a stream with a stale model.
@@ -136,16 +143,15 @@ export function InputArea() {
   }, [speechError]);
 
   const handleMicClick = useCallback(async () => {
+    // Manual stop still works; silence auto-stop is handled by onAutoTranscript.
     if (speechState === 'recording') {
       try {
         const text = await stopRecording();
-        if (text) {
-          setInput((prev) => (prev ? prev + ' ' + text : text));
-        }
+        if (text) sendVoiceRef.current(text);
       } catch {
         // Error is captured in useSpeech
       }
-    } else {
+    } else if (speechState === 'idle') {
       await startRecording();
     }
   }, [speechState, startRecording, stopRecording]);
@@ -166,8 +172,8 @@ export function InputArea() {
     resetStream();
   }, [resetStream]);
 
-  const sendMessage = useCallback(async () => {
-    const content = input.trim();
+  const sendMessage = useCallback(async (overrideText?: string) => {
+    const content = (overrideText ?? input).trim();
     if (!content || streamState.isStreaming) return;
     if (!selectedModel) {
       toast.error('Pick a model first (⌘K)');
@@ -540,10 +546,15 @@ export function InputArea() {
     maxTokens,
   ]);
 
+  // Voice: after silence → transcript → auto-send as a chat request
+  sendVoiceRef.current = (text: string) => {
+    void sendMessage(text);
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      sendMessage();
+      void sendMessage();
     }
   };
 
