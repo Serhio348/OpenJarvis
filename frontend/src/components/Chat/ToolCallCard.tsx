@@ -12,23 +12,33 @@ const statusConfig = {
   error: { icon: XCircle, color: 'var(--color-error)' },
 };
 
-function previewArgs(raw: string): string {
-  if (!raw) return '';
+function asText(value: unknown): string {
+  if (value == null) return '';
+  if (typeof value === 'string') return value;
   try {
-    const parsed = JSON.parse(raw);
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function previewArgs(raw: unknown): string {
+  const text = asText(raw);
+  if (!text) return '';
+  try {
+    const parsed = typeof raw === 'object' && raw !== null ? raw : JSON.parse(text);
     if (parsed && typeof parsed === 'object') {
-      const entries = Object.entries(parsed);
+      const entries = Object.entries(parsed as Record<string, unknown>);
       if (entries.length === 0) return '';
       const [k, v] = entries[0];
-      const valStr =
-        typeof v === 'string' ? v : JSON.stringify(v);
+      const valStr = typeof v === 'string' ? v : JSON.stringify(v);
       const trimmed = valStr.length > 40 ? `${valStr.slice(0, 40)}…` : valStr;
       return entries.length === 1 ? `${k}: ${trimmed}` : `${k}: ${trimmed}, …`;
     }
   } catch {
     /* fall through */
   }
-  return raw.length > 60 ? `${raw.slice(0, 60)}…` : raw;
+  return text.length > 60 ? `${text.slice(0, 60)}…` : text;
 }
 
 export function ToolCallCard({ toolCall }: Props) {
@@ -124,7 +134,7 @@ export function ToolCallCard({ toolCall }: Props) {
               </pre>
             </div>
           )}
-          {toolCall.result && (
+          {toolCall.result != null && toolCall.result !== '' && (
             <div className="mt-1.5">
               <div
                 style={{
@@ -149,7 +159,7 @@ export function ToolCallCard({ toolCall }: Props) {
                   wordBreak: 'break-word',
                 }}
               >
-                {toolCall.result}
+                {asText(toolCall.result)}
               </pre>
             </div>
           )}
@@ -159,10 +169,18 @@ export function ToolCallCard({ toolCall }: Props) {
   );
 }
 
-function formatJson(raw: string): string {
+function formatJson(raw: unknown): string {
+  if (typeof raw === 'object' && raw !== null) {
+    try {
+      return JSON.stringify(raw, null, 2);
+    } catch {
+      return String(raw);
+    }
+  }
+  const text = asText(raw);
   try {
-    return JSON.stringify(JSON.parse(raw), null, 2);
+    return JSON.stringify(JSON.parse(text), null, 2);
   } catch {
-    return raw;
+    return text;
   }
 }

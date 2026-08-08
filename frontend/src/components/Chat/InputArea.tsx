@@ -391,10 +391,16 @@ export function InputArea() {
         } else if (eventName === 'tool_call_start') {
           try {
             const data = JSON.parse(sseEvent.data);
+            const argsText =
+              typeof data.arguments === 'string'
+                ? data.arguments
+                : data.arguments != null
+                  ? JSON.stringify(data.arguments)
+                  : '';
             const tc: ToolCallInfo = {
               id: generateId(),
               tool: data.tool,
-              arguments: data.arguments || '',
+              arguments: argsText,
               status: 'running',
             };
             toolCalls.push(tc);
@@ -405,7 +411,7 @@ export function InputArea() {
             updateLastAssistant(convId, accumulatedContent, [...toolCalls]);
             useAppStore.getState().addLogEntry({
               timestamp: Date.now(), level: 'info', category: 'tool',
-              message: `Calling ${data.tool}(${data.arguments || ''})`,
+              message: `Calling ${data.tool}(${argsText})`,
             });
           } catch {}
         } else if (eventName === 'tool_call_end') {
@@ -417,7 +423,12 @@ export function InputArea() {
             if (tc) {
               tc.status = data.success ? 'success' : 'error';
               tc.latency = data.latency;
-              tc.result = data.result;
+              tc.result =
+                typeof data.result === 'string'
+                  ? data.result
+                  : data.result != null
+                    ? JSON.stringify(data.result, null, 2)
+                    : undefined;
             }
             setStreamState({
               phase: 'Generating...',
