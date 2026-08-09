@@ -80,6 +80,8 @@ interface Settings {
   temperature: number;
   maxTokens: number;
   speechEnabled: boolean;
+  /** Auto-speak assistant replies (browser TTS, Jarvis-like voice). */
+  speakRepliesEnabled: boolean;
 }
 
 function loadSettings(): Settings {
@@ -93,6 +95,7 @@ function loadSettings(): Settings {
     temperature: 0.7,
     maxTokens: 384000,
     speechEnabled: true,
+    speakRepliesEnabled: true,
   };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);

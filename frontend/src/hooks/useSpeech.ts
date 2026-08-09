@@ -380,7 +380,7 @@ export function useSpeech(options: UseSpeechOptions = {}) {
         const prevEnd = rec.onend;
         rec.onend = () => {
           try {
-            prevEnd?.(new Event('end'));
+            prevEnd?.();
           } catch {
             // ignore
           }

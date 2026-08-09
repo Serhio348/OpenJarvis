@@ -722,6 +722,26 @@ export function SettingsPage() {
                 />
               </button>
             </SettingRow>
+            <SettingRow
+              label="Speak replies (Jarvis)"
+              description="Озвучивать ответы: британский мужской en-GB (Jarvis). Для русского — мужской ru-RU"
+            >
+              <button
+                onClick={() => { updateSettings({ speakRepliesEnabled: !settings.speakRepliesEnabled }); showSaved(); }}
+                className="relative w-11 h-6 rounded-full transition-colors cursor-pointer"
+                style={{
+                  background: settings.speakRepliesEnabled ? 'var(--color-accent)' : 'var(--color-bg-tertiary)',
+                }}
+              >
+                <span
+                  className="absolute top-0.5 left-0.5 w-5 h-5 rounded-full transition-transform bg-white"
+                  style={{
+                    transform: settings.speakRepliesEnabled ? 'translateX(20px)' : 'translateX(0)',
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+                  }}
+                />
+              </button>
+            </SettingRow>
             <SettingRow label="Backend status" description="Chrome/Edge: Web Speech ru-RU (cloud). Fallback: local Whisper">
               <div className="flex items-center gap-2">
                 <span

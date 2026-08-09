@@ -7,6 +7,7 @@ import { fetchSavings, getBase } from '../../lib/api';
 import { listConnectors, getSyncStatus } from '../../lib/connectors-api';
 import { MicButton } from './MicButton';
 import { useSpeech } from '../../hooks/useSpeech';
+import { preloadTtsVoices, speakText, stopSpeaking } from '../../hooks/useTts';
 import type {
   ChatMessage,
   MessageTelemetry,
@@ -85,6 +86,7 @@ export function InputArea() {
   const streamState = useAppStore((s) => s.streamState);
   const messages = useAppStore((s) => s.messages);
   const speechEnabled = useAppStore((s) => s.settings.speechEnabled);
+  const speakRepliesEnabled = useAppStore((s) => s.settings.speakRepliesEnabled);
   const maxTokens = useAppStore((s) => s.settings.maxTokens);
   const temperature = useAppStore((s) => s.settings.temperature);
   const createConversation = useAppStore((s) => s.createConversation);
@@ -128,6 +130,10 @@ export function InputArea() {
     prevModelRef.current = selectedModel;
   }, [selectedModel, streamState.isStreaming, resetStream]);
 
+  useEffect(() => {
+    preloadTtsVoices();
+  }, []);
+
   // Web Speech (ru-RU) works without local whisper; fallback still needs backend.
   const micDisabled = !speechEnabled || streamState.isStreaming;
   const micReason: 'not-enabled' | 'no-backend' | 'streaming' | undefined =
@@ -152,6 +158,7 @@ export function InputArea() {
         // Error is captured in useSpeech
       }
     } else if (speechState === 'idle') {
+      stopSpeaking(); // don't let Jarvis talk over the mic
       await startRecording();
     }
   }, [speechState, startRecording, stopRecording]);
@@ -165,6 +172,7 @@ export function InputArea() {
 
   const stopStreaming = useCallback(() => {
     abortRef.current?.abort();
+    stopSpeaking();
     if (timerRef.current) {
       clearInterval(timerRef.current);
       timerRef.current = null;
@@ -533,6 +541,9 @@ export function InputArea() {
         researchTraces.length > 0 ? researchTraces : undefined,
         researchSourcesByRef.size > 0 ? flushSources() : undefined,
       );
+      if (speakRepliesEnabled && accumulatedContent.trim()) {
+        void speakText(accumulatedContent);
+      }
       if (timerRef.current) {
         clearInterval(timerRef.current);
         timerRef.current = null;
@@ -567,6 +578,7 @@ export function InputArea() {
     deepResearch,
     temperature,
     maxTokens,
+    speakRepliesEnabled,
   ]);
 
   // Voice: after silence → transcript → auto-send as a chat request
