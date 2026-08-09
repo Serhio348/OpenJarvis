@@ -1,4 +1,4 @@
-"""OrchestratorAgent — multi-turn agent with tool-calling loop.
+﻿"""OrchestratorAgent тАФ multi-turn agent with tool-calling loop.
 
 Supports two modes:
 
@@ -42,7 +42,8 @@ class OrchestratorAgent(ToolUsingAgent):
 
     agent_id = "orchestrator"
     _default_temperature = 0.7
-    _default_max_tokens = 1024
+    # DeepSeek V4 can emit large tool payloads; config.max_tokens overrides this.
+    _default_max_tokens = 384000
     _default_max_turns = 10
 
     def __init__(
@@ -230,10 +231,11 @@ class OrchestratorAgent(ToolUsingAgent):
             if self._loop_guard:
                 messages = self._loop_guard.compress_context(messages)
 
-            # Build generate kwargs
+            # Build generate kwargs — tools are mandatory (model is a router).
             gen_kwargs: dict[str, Any] = {}
             if openai_tools:
                 gen_kwargs["tools"] = openai_tools
+                gen_kwargs["tool_choice"] = "required"
 
             result = self._generate(messages, **gen_kwargs)
 
@@ -245,19 +247,62 @@ class OrchestratorAgent(ToolUsingAgent):
             content = result.get("content", "")
             raw_tool_calls = result.get("tool_calls", [])
 
-            # No tool calls -> check continuation, then final answer
+            # DeepSeek may put tool calls in DSML markup inside content.
+            if not raw_tool_calls:
+                from openjarvis.engine.deepseek_dsml import (
+                    content_has_dsml,
+                    parse_dsml_tool_calls,
+                    strip_dsml_markup,
+                )
+
+                if content_has_dsml(content or ""):
+                    dsml_calls = parse_dsml_tool_calls(content or "")
+                    if dsml_calls:
+                        raw_tool_calls = dsml_calls
+                    content = strip_dsml_markup(content or "")
+
+            # Free-text answers are not allowed when tools exist.
             if not raw_tool_calls:
                 content = self._check_continuation(result, messages)
                 content = self._strip_think_tags(content)
-                self._emit_turn_end(turns=turns, content_length=len(content))
+                from openjarvis.engine.deepseek_dsml import (
+                    content_has_dsml,
+                    strip_dsml_markup,
+                )
+
+                if content_has_dsml(content or ""):
+                    content = strip_dsml_markup(content or "")
+                if openai_tools and turns < self._max_turns:
+                    messages.append(
+                        Message(
+                            role=Role.ASSISTANT,
+                            content=content or "(missing tool call)",
+                        )
+                    )
+                    messages.append(
+                        Message(
+                            role=Role.USER,
+                            content=(
+                                "A tool call is required. "
+                                "Call file/office tools for actions, or "
+                                "assistant_reply to clarify / say unsupported."
+                            ),
+                        )
+                    )
+                    continue
+                self._emit_turn_end(turns=turns, content_length=len(content or ""))
                 return AgentResult(
-                    content=content,
+                    content=(
+                        content
+                        or "No tool was called. Please rephrase the request."
+                    ),
                     tool_results=all_tool_results,
                     turns=turns,
                     metadata={
                         "prompt_tokens": total_prompt_tokens,
                         "completion_tokens": total_completion_tokens,
                         "total_tokens": total_prompt_tokens + total_completion_tokens,
+                        "missing_tool_call": True,
                     },
                 )
 
@@ -271,12 +316,17 @@ class OrchestratorAgent(ToolUsingAgent):
                 for i, tc in enumerate(raw_tool_calls)
             ]
 
-            # Append assistant message with tool calls
+            # Keep reasoning_content for DeepSeek tool round-trips if present.
+            assistant_meta: dict[str, Any] = {}
+            reasoning = result.get("reasoning_content")
+            if isinstance(reasoning, str) and reasoning:
+                assistant_meta["reasoning_content"] = reasoning
             messages.append(
                 Message(
                     role=Role.ASSISTANT,
                     content=content,
                     tool_calls=tool_calls,
+                    metadata=assistant_meta,
                 )
             )
 
@@ -357,8 +407,36 @@ class OrchestratorAgent(ToolUsingAgent):
                         )
                     )
 
-        # Max turns exceeded
-        final_content = self._strip_think_tags(content) if content else ""
+            # User-visible text only via assistant_reply (end of turn).
+            batch = all_tool_results[-len(tool_calls) :] if tool_calls else []
+            replies = [
+                tr
+                for tr in batch
+                if tr.tool_name == "assistant_reply" and tr.success and tr.content
+            ]
+            if replies:
+                answer = replies[-1].content
+                self._emit_turn_end(turns=turns, content_length=len(answer))
+                return AgentResult(
+                    content=answer,
+                    tool_results=all_tool_results,
+                    turns=turns,
+                    metadata={
+                        "prompt_tokens": total_prompt_tokens,
+                        "completion_tokens": total_completion_tokens,
+                        "total_tokens": total_prompt_tokens + total_completion_tokens,
+                        "finalized_after": "assistant_reply",
+                    },
+                )
+
+        # Max turns exceeded — surface last tool output rather than inventing.
+        final_content = ""
+        for tr in reversed(all_tool_results):
+            if tr.success and (tr.content or "").strip():
+                final_content = tr.content.strip()
+                break
+        if not final_content:
+            final_content = self._strip_think_tags(content) if content else ""
         self._emit_turn_end(turns=turns, max_turns_exceeded=True)
         return AgentResult(
             content=final_content or "Maximum turns reached without a final answer.",

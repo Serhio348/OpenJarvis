@@ -858,12 +858,21 @@ async def list_models(request: Request) -> ModelListResponse:
 
     # Prefer engine.list_models() so mock engines work in tests.
     # Filter out any cloud model IDs that may appear via MultiEngine.
-    # Fall back to direct Ollama query only when the engine returns nothing.
+    # Fall back to a short Ollama probe only when nothing local was found —
+    # never block the UI for long when Ollama is down (cloud-only setups).
     engine = request.app.state.engine
-    all_ids = await asyncio.to_thread(engine.list_models)
+    try:
+        all_ids = await asyncio.wait_for(
+            asyncio.to_thread(engine.list_models), timeout=2.0
+        )
+    except (asyncio.TimeoutError, Exception):
+        all_ids = []
     model_ids = [m for m in all_ids if not is_cloud_model(m)]
     if not model_ids:
-        model_ids = await list_local_models()
+        try:
+            model_ids = await asyncio.wait_for(list_local_models(), timeout=1.0)
+        except (asyncio.TimeoutError, Exception):
+            model_ids = []
 
     return ModelListResponse(
         data=[ModelObject(id=mid) for mid in model_ids],

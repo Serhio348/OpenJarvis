@@ -173,7 +173,9 @@ export function InputArea() {
   }, [resetStream]);
 
   const sendMessage = useCallback(async (overrideText?: string) => {
-    const content = (overrideText ?? input).trim();
+    // onClick={sendMessage} would pass a MouseEvent as the first arg — only
+    // accept real string overrides (voice auto-send / programmatic send).
+    const content = (typeof overrideText === 'string' ? overrideText : input).trim();
     if (!content || streamState.isStreaming) return;
     if (!selectedModel) {
       toast.error('Pick a model first (⌘K)');
@@ -480,7 +482,21 @@ export function InputArea() {
       useAppStore.getState().setLiveEnergy(null);
     } finally {
       if (!accumulatedContent) {
-        accumulatedContent = 'No response was generated. Please try again.';
+        const lastOk = [...toolCalls].reverse().find((t) => t.status === 'success');
+        if (lastOk?.result) {
+          const snippet =
+            lastOk.result.length > 1200
+              ? `${lastOk.result.slice(0, 1200)}…`
+              : lastOk.result;
+          accumulatedContent =
+            `Инструмент «${lastOk.tool}» выполнен, но модель не вернула текст.\n\n${snippet}`;
+        } else if (toolCalls.length > 0) {
+          accumulatedContent =
+            'Инструменты отработали, но модель не вернула итоговый текст. Открой карточку tool выше или повтори запрос.';
+        } else {
+          accumulatedContent =
+            'Ответ оборвался (часто лимит токенов DeepSeek). Повтори коротко: «clone выписку для …» или сделай новый чат.';
+        }
       }
       const totalMs = Date.now() - startTime;
       const _CLOUD_PREFIXES = [
@@ -502,19 +518,10 @@ export function InputArea() {
         complexity_tier: complexity?.tier,
         suggested_max_tokens: complexity?.suggested_max_tokens,
       };
-      // Check if the response has digest audio available
-      let audioMeta: { url: string } | undefined;
-      try {
-        const digestRes = await fetch(`${getBase()}/api/digest`);
-        if (digestRes.ok) {
-          const digest = await digestRes.json();
-          if (digest.audio_available) {
-            audioMeta = { url: `${getBase()}/api/digest/audio` };
-          }
-        }
-      } catch {
-        // Not a digest response or server unavailable — skip
-      }
+      // Morning-digest audio endpoint is optional and usually absent in
+      // local/cloud setups — skip the probe so the console isn't spammed
+      // with /api/digest 404 after every reply.
+      const audioMeta: { url: string } | undefined = undefined;
 
       updateLastAssistant(
         convId,
@@ -645,7 +652,7 @@ export function InputArea() {
               reason={micReason}
             />
             <button
-              onClick={sendMessage}
+              onClick={() => void sendMessage()}
               disabled={!input.trim() || modelLoading || !selectedModel}
               title={selectedModel ? 'Send message' : 'Pick a model first (⌘K)'}
               className="p-2 rounded-xl transition-colors shrink-0 cursor-pointer disabled:opacity-30 disabled:cursor-default"

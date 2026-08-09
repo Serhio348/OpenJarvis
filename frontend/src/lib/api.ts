@@ -352,6 +352,8 @@ export async function transcribeAudio(audioBlob: Blob, filename = 'recording.web
   }
   const formData = new FormData();
   formData.append('file', audioBlob, filename);
+  // Force Russian STT (matches ~/.openjarvis/config.toml speech.language).
+  formData.append('language', 'ru');
   const res = await apiFetch(`/v1/speech/transcribe`, {
     method: 'POST',
     body: formData,

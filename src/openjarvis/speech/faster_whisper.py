@@ -34,10 +34,13 @@ class FasterWhisperBackend(SpeechBackend):
         model_size: str = "base",
         device: str = "auto",
         compute_type: str = "float16",
+        language: Optional[str] = None,
     ) -> None:
         self._model_size = model_size
         self._device = device
         self._compute_type = compute_type
+        # Empty/None = auto-detect (often wrong on short Russian clips).
+        self._default_language = (language or "").strip() or None
         self._model: Optional[WhisperModel] = None
         self._last_error: Optional[str] = None
 
@@ -116,9 +119,18 @@ class FasterWhisperBackend(SpeechBackend):
                 with tmp:
                     tmp.write(audio)
 
-                kwargs = {}
-                if language:
-                    kwargs["language"] = language
+                lang = (language or "").strip() or self._default_language
+                kwargs: dict = {
+                    # Reduce false English/other-language transcripts on short clips.
+                    "vad_filter": True,
+                    "condition_on_previous_text": False,
+                }
+                if lang:
+                    kwargs["language"] = lang
+                    if lang.lower().startswith("ru"):
+                        kwargs["initial_prompt"] = (
+                            "Диалог на русском языке. Команды ассистенту."
+                        )
 
                 segments_iter, info = model.transcribe(tmp.name, **kwargs)
                 segments_list = list(segments_iter)
@@ -157,14 +169,19 @@ class FasterWhisperBackend(SpeechBackend):
         )
 
     def health(self) -> bool:
-        """Check if model is loaded or loadable."""
-        try:
-            self._ensure_model()
-            return True
-        except Exception as exc:
-            self._last_error = str(exc)
-            logger.debug("Faster-Whisper health check failed: %s", exc)
+        """Check backend readiness without blocking on model download.
+
+        UI polls /v1/speech/health frequently. Loading Whisper here freezes the
+        whole API (event loop) and looks like ECONNREFUSED in Vite.
+        """
+        if WhisperModel is None:
+            self._last_error = (
+                "faster-whisper is not installed. "
+                "Install with: uv sync --extra desktop"
+            )
             return False
+        # Model loads lazily on first transcribe.
+        return True
 
     def last_error(self) -> Optional[str]:
         """Return the last model load or transcription error, if any."""

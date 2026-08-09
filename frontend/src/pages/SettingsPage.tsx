@@ -690,13 +690,13 @@ export function SettingsPage() {
                 className="w-32 cursor-pointer accent-[var(--color-accent)]"
               />
             </SettingRow>
-            <SettingRow label="Max tokens" description={`${settings.maxTokens}`}>
+            <SettingRow label="Max tokens" description={`${settings.maxTokens} (DeepSeek max 384K — no app-side cut)`}>
               <input
                 type="range"
-                min="256"
-                max="32768"
-                step="256"
-                value={settings.maxTokens}
+                min="1024"
+                max="384000"
+                step="1024"
+                value={Math.min(settings.maxTokens, 384000)}
                 onChange={(e) => { updateSettings({ maxTokens: parseInt(e.target.value) }); showSaved(); }}
                 className="w-32 cursor-pointer accent-[var(--color-accent)]"
               />

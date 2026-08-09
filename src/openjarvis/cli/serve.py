@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 
 import click
@@ -24,6 +25,39 @@ from openjarvis.intelligence import (
 )
 
 logger = logging.getLogger(__name__)
+
+_CLOUD_KEY_NAMES = (
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "OPENROUTER_API_KEY",
+    "MINIMAX_API_KEY",
+    "DEEPSEEK_API_KEY",
+)
+
+
+def _inject_cloud_keys() -> None:
+    """Load ~/.openjarvis/cloud-keys.env into os.environ if keys are missing.
+
+    CloudEngine only reads process env; the browser UI and cloud_router also
+    persist keys to this file. Without this, a bare ``jarvis serve`` after
+    reboot looks like DeepSeek disappeared even though the key file exists.
+    """
+    keys_path = get_config_dir() / "cloud-keys.env"
+    if not keys_path.exists():
+        return
+    try:
+        for raw in keys_path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            name, value = line.split("=", 1)
+            name, value = name.strip(), value.strip()
+            if name in _CLOUD_KEY_NAMES and value and name not in os.environ:
+                os.environ[name] = value
+    except OSError as exc:
+        logger.debug("Failed to load cloud-keys.env: %s", exc)
 
 
 def _unique_model_ids(model_ids: list[str]) -> list[str]:
@@ -127,6 +161,8 @@ def serve(
     # credential store. Restore them before engines and tools are constructed
     # so availability checks and tool instances see the same environment.
     inject_credentials()
+    # Cloud API keys from Cloud Models tab / start-dev.ps1
+    _inject_cloud_keys()
 
     config = load_config()
 
@@ -178,16 +214,8 @@ def serve(
     # If cloud API keys are set, prepare a cloud engine. We build the
     # MultiEngine after local discovery so healthy local fallbacks such as
     # Ollama stay visible even when the configured preferred engine is MLX.
-    import os
-
     cloud_engine = None
-    _has_cloud = (
-        os.environ.get("OPENAI_API_KEY")
-        or os.environ.get("ANTHROPIC_API_KEY")
-        or os.environ.get("GEMINI_API_KEY")
-        or os.environ.get("GOOGLE_API_KEY")
-        or os.environ.get("OPENROUTER_API_KEY")
-    )
+    _has_cloud = any(os.environ.get(name) for name in _CLOUD_KEY_NAMES)
     if _has_cloud and engine_name != "cloud":
         try:
             from openjarvis.engine.cloud import CloudEngine

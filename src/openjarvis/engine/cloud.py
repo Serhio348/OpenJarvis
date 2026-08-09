@@ -1058,11 +1058,17 @@ class CloudEngine(InferenceEngine):
         # silently dropped), so the UI only got advice instead of actions.
         tools = kwargs.pop("tools", None)
         tool_choice = kwargs.pop("tool_choice", None)
+        # DeepSeek requires max_tokens; 0/None → provider output ceiling.
+        out_budget = int(max_tokens) if max_tokens and int(max_tokens) > 0 else 384000
+        out_budget = min(out_budget, 384000)
         create_kwargs: Dict[str, Any] = {
             "model": model,
             "messages": messages_to_dicts(messages),
-            "max_tokens": max_tokens,
+            "max_tokens": out_budget,
             "temperature": temperature,
+            # V4 Flash/Pro default to thinking=on — slow + requires
+            # reasoning_content round-trip after tool calls. Always off here.
+            "extra_body": {"thinking": {"type": "disabled"}},
         }
         if tools:
             create_kwargs["tools"] = tools
@@ -1087,6 +1093,9 @@ class CloudEngine(InferenceEngine):
             "cost_usd": estimate_cost(model, prompt_tokens, completion_tokens),
             "ttft": elapsed,
         }
+        reasoning = getattr(choice.message, "reasoning_content", None)
+        if isinstance(reasoning, str) and reasoning:
+            result["reasoning_content"] = reasoning
         if hasattr(choice.message, "tool_calls") and choice.message.tool_calls:
             result["tool_calls"] = [
                 {
@@ -1096,6 +1105,26 @@ class CloudEngine(InferenceEngine):
                 }
                 for tc in choice.message.tool_calls
             ]
+        # DeepSeek V4 may emit DSML tool markup in content instead of
+        # (or as well as) OpenAI tool_calls — recover and strip it.
+        if not result.get("tool_calls"):
+            from openjarvis.engine.deepseek_dsml import (
+                parse_dsml_tool_calls,
+                strip_dsml_markup,
+            )
+
+            dsml_calls = parse_dsml_tool_calls(result.get("content") or "")
+            if dsml_calls:
+                result["tool_calls"] = dsml_calls
+                result["content"] = strip_dsml_markup(result.get("content") or "")
+                if result.get("finish_reason") == "stop":
+                    result["finish_reason"] = "tool_calls"
+        elif result.get("content") and (
+            "DSML" in result["content"] or "invoke name=" in result["content"]
+        ):
+            from openjarvis.engine.deepseek_dsml import strip_dsml_markup
+
+            result["content"] = strip_dsml_markup(result["content"])
         return result
 
     def generate(
@@ -1389,6 +1418,7 @@ class CloudEngine(InferenceEngine):
             "max_tokens": max_tokens,
             "temperature": temperature,
             "stream": True,
+            "extra_body": {"thinking": {"type": "disabled"}},
         }
         resp = self._deepseek_client.chat.completions.create(**create_kwargs)
         for chunk in resp:

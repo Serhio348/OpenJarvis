@@ -29,7 +29,11 @@ class FileWriteTool(BaseTool):
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="file_write",
-            description=("Write content to a file. Supports write and append modes."),
+            description=(
+                "Write/create a text file on disk by path (write or append). "
+                "Do NOT use to edit an already-open Word document — "
+                "use office_word (replace/append/insert) instead."
+            ),
             parameters={
                 "type": "object",
                 "properties": {

@@ -893,6 +893,16 @@ async def transcribe_speech(request: Request):
 
     audio_bytes = await audio_file.read()
     language = form.get("language")
+    if isinstance(language, str):
+        language = language.strip() or None
+    else:
+        language = None
+    # Prefer request language; else force config.speech.language (e.g. "ru").
+    if not language:
+        cfg = getattr(request.app.state, "config", None)
+        speech_cfg = getattr(cfg, "speech", None) if cfg is not None else None
+        configured = getattr(speech_cfg, "language", "") or ""
+        language = configured.strip() or None
 
     # Detect format from filename
     filename = getattr(audio_file, "filename", "audio.wav")
@@ -903,7 +913,7 @@ async def transcribe_speech(request: Request):
             backend.transcribe,
             audio_bytes,
             format=ext,
-            language=language or None,
+            language=language,
         )
     except Exception as exc:
         logger.exception("Speech transcription failed")
@@ -927,7 +937,8 @@ async def speech_health(request: Request):
     if backend is None:
         return {"available": False, "reason": "No speech backend configured"}
     try:
-        available = backend.health()
+        # Never run sync model I/O on the event loop.
+        available = await asyncio.to_thread(backend.health)
         reason = None
     except Exception as exc:
         logger.exception("Speech health check failed")

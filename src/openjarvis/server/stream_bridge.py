@@ -115,7 +115,7 @@ class AgentStreamBridge:
     def _run_agent(self) -> object:
         """Execute the agent synchronously (called via asyncio.to_thread)."""
         ctx = AgentContext()
-        # Build conversation context from prior messages
+        # Full chat history — do not truncate prior turns.
         if len(self._request.messages) > 1:
             from openjarvis.core.types import Message, Role
 
@@ -134,14 +134,27 @@ class AgentStreamBridge:
             self._request.messages[-1].content if self._request.messages else ""
         )
 
-        # Override agent model for this request if the caller specified one
+        # Override agent model / max_tokens for this request.
+        # DeepSeek has no "unlimited" API flag — use request value, else
+        # provider output ceiling (384K for V4 Flash).
+        _PROVIDER_MAX = 384000
         original_model = self._agent._model
+        original_max_tokens = getattr(self._agent, "_max_tokens", None)
         if self._model:
             self._agent._model = self._model
+        req_max = getattr(self._request, "max_tokens", None) or 0
+        if req_max > 0:
+            self._agent._max_tokens = min(int(req_max), _PROVIDER_MAX)
+        elif original_max_tokens:
+            self._agent._max_tokens = min(int(original_max_tokens), _PROVIDER_MAX)
+        else:
+            self._agent._max_tokens = _PROVIDER_MAX
         try:
             return self._agent.run(input_text, context=ctx)
         finally:
             self._agent._model = original_model
+            if original_max_tokens is not None:
+                self._agent._max_tokens = original_max_tokens
 
     # ------------------------------------------------------------------
     # Public streaming interface
@@ -240,65 +253,27 @@ class AgentStreamBridge:
                     {"results": tool_results_data},
                 )
 
-            # Stream content using real LLM token streaming via
-            # engine.stream_full() when the engine is available.
-            content = agent_result.content or ""
-            engine = getattr(self._agent, "_engine", None)
-            used_real_streaming = False
-
-            if engine is not None and hasattr(engine, "stream_full") and content:
-                # Re-stream using the engine for real token delivery.
-                # Build the same messages the agent used for its final turn.
-                try:
-                    from openjarvis.core.types import Message as MsgType
-                    from openjarvis.core.types import Role as RoleType
-
-                    replay_messages = []
-                    for m in self._request.messages:
-                        role = (
-                            RoleType(m.role)
-                            if m.role in {r.value for r in RoleType}
-                            else RoleType.USER
-                        )
-                        replay_messages.append(
-                            MsgType(
-                                role=role,
-                                content=m.content or "",
-                                name=m.name,
-                                tool_call_id=m.tool_call_id,
-                            )
-                        )
-
-                    async for sc in engine.stream_full(
-                        replay_messages,
-                        model=self._model,
-                    ):
-                        if sc.content:
-                            chunk = ChatCompletionChunk(
-                                id=self._chunk_id,
-                                model=self._model,
-                                choices=[
-                                    StreamChoice(
-                                        delta=DeltaMessage(content=sc.content),
-                                    )
-                                ],
-                            )
-                            yield f"data: {chunk.model_dump_json()}\n\n"
-                    used_real_streaming = True
-                except Exception as stream_exc:
-                    import logging as _logging
-
-                    _logger = _logging.getLogger("openjarvis.server")
-                    _logger.warning(
-                        "Real streaming failed, falling back to word replay: %s",
-                        stream_exc,
-                    )
-
-            # Fallback: word-by-word replay if real streaming was not used
-            if not used_real_streaming and content:
-                words = content.split(" ")
-                for i, word in enumerate(words):
-                    token = word if i == 0 else " " + word
+            # Replay the agent answer we already have. Do NOT call
+            # engine.stream_full() again: that would issue a second full LLM
+            # round-trip without tool results, doubling latency and often
+            # regenerating a worse "I have no access" reply after tools ran.
+            content = (agent_result.content or "").strip()
+            if not content and tool_results_data:
+                last = tool_results_data[-1]
+                status = "succeeded" if last.get("success") else "failed"
+                snippet = (last.get("output") or "").strip()
+                if len(snippet) > 1200:
+                    snippet = snippet[:1200] + "…"
+                content = (
+                    f"Tool `{last.get('tool_name')}` {status}, but the model "
+                    f"returned no final text.\n\n```\n{snippet}\n```"
+                )
+            if content:
+                # Chunk by characters so Cyrillic / markdown stay intact;
+                # tiny sleep keeps the UI feeling streamed without adding seconds.
+                step = 24
+                for i in range(0, len(content), step):
+                    token = content[i : i + step]
                     chunk = ChatCompletionChunk(
                         id=self._chunk_id,
                         model=self._model,
@@ -309,7 +284,7 @@ class AgentStreamBridge:
                         ],
                     )
                     yield f"data: {chunk.model_dump_json()}\n\n"
-                    await asyncio.sleep(0.012)
+                    await asyncio.sleep(0.004)
 
             # Final chunk: finish_reason + usage
             prompt_tokens = agent_result.metadata.get("prompt_tokens", 0)

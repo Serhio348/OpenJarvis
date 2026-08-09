@@ -348,7 +348,9 @@ async def list_local_models() -> list[str]:
     """Return Ollama model names directly from the Ollama API."""
     host = _ollama_host()
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        # Short timeout: cloud-only Windows setups have no Ollama; a long
+        # connect wait makes the whole UI look stuck on every page load.
+        async with httpx.AsyncClient(timeout=1.0) as client:
             resp = await client.get(f"{host}/api/tags")
             resp.raise_for_status()
             data = resp.json()

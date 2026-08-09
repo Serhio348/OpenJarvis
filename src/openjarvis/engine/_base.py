@@ -90,6 +90,13 @@ def messages_to_dicts(messages: Sequence[Message]) -> List[Dict[str, Any]]:
             ]
         if m.tool_call_id:
             d["tool_call_id"] = m.tool_call_id
+        # DeepSeek thinking mode: assistant turns that made tool calls MUST
+        # replay reasoning_content or the API returns HTTP 400.
+        for key in _REASONING_METADATA_KEYS:
+            value = m.metadata.get(key) if m.metadata else None
+            if isinstance(value, str) and value:
+                d[key] = value
+                break
         # Vision: forward base64 images to the engine. Ollama's /api/chat
         # accepts an "images" array on a message; text messages skip this.
         if getattr(m, "images", None):

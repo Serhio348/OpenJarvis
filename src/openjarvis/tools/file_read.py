@@ -29,7 +29,11 @@ class FileReadTool(BaseTool):
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="file_read",
-            description=("Read the contents of a file. Returns the text content."),
+            description=(
+                "Read a text file from disk by path. "
+                "Do NOT use for directories (use list_dir) or for an already-open "
+                "Word document (use office_word)."
+            ),
             parameters={
                 "type": "object",
                 "properties": {

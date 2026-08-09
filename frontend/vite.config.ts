@@ -53,18 +53,38 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    // Listen on all local interfaces so both http://127.0.0.1:5173 and
+    // http://localhost:5173 work. Proxy target stays on 127.0.0.1 because
+    // `jarvis serve --host 127.0.0.1` is IPv4-only — `localhost`→::1 breaks it.
+    host: true,
+    // Force HMR websocket to 127.0.0.1 — browser on 127.0.0.1 otherwise
+    // tries ws://localhost and fails on Windows IPv6 localhost.
+    hmr: {
+      host: '127.0.0.1',
+      protocol: 'ws',
+      clientPort: 5173,
+    },
     proxy: {
-      // ws: true is required for the /v1/agents/events WebSocket. Without it
-      // Vite proxies the HTTP request but not the upgrade, so the socket never
-      // opens — no error, no close event, just silence — and every live agent
-      // view sits empty in dev while working in a production build.
+      // Always target 127.0.0.1 (IPv4). `localhost` can resolve to ::1 while
+      // `jarvis serve --host 127.0.0.1` is IPv4-only → proxy 500s.
+      // ws: true is required for /v1/agents/events WebSocket upgrades.
       '/v1': {
-        target: process.env.VITE_API_URL || 'http://localhost:8000',
+        target: process.env.VITE_API_URL || 'http://127.0.0.1:8000',
         changeOrigin: true,
         ws: true,
       },
-      '/health': process.env.VITE_API_URL || 'http://localhost:8000',
-      '/api': process.env.VITE_API_URL || 'http://localhost:8000',
+      '/health': {
+        target: process.env.VITE_API_URL || 'http://127.0.0.1:8000',
+        changeOrigin: true,
+      },
+      '/api': {
+        target: process.env.VITE_API_URL || 'http://127.0.0.1:8000',
+        changeOrigin: true,
+      },
+      '/dashboard': {
+        target: process.env.VITE_API_URL || 'http://127.0.0.1:8000',
+        changeOrigin: true,
+      },
     },
   },
 });

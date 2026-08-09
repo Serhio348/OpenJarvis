@@ -98,6 +98,36 @@ except ImportError:
     pass
 
 try:
+    import openjarvis.tools.list_dir  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.file_search  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.assistant_reply  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.open_path  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.close_path  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.office_word  # noqa: F401
+except ImportError:
+    pass
+
+try:
     import openjarvis.tools.apply_patch  # noqa: F401
 except ImportError:
     pass

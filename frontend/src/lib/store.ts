@@ -91,7 +91,7 @@ function loadSettings(): Settings {
     defaultModel: '',
     defaultAgent: '',
     temperature: 0.7,
-    maxTokens: 4096,
+    maxTokens: 384000,
     speechEnabled: true,
   };
   try {

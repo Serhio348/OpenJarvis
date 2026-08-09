@@ -41,8 +41,15 @@ impl BaseTool for ShellExecTool {
         let cwd = params["cwd"].as_str();
 
         let mut cmd = if cfg!(target_os = "windows") {
-            let mut c = Command::new("cmd");
-            c.args(["/C", command]);
+            // Use raw_arg so PowerShell -Command "..." quoting survives.
+            // args(["/C", command]) re-escapes quotes and often echoes the
+            // script text with exit code 0 instead of running it.
+            let mut c = Command::new("cmd.exe");
+            c.arg("/C");
+            {
+                use std::os::windows::process::CommandExt;
+                c.raw_arg(command);
+            }
             c
         } else {
             let mut c = Command::new("sh");
