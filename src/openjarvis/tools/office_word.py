@@ -130,16 +130,14 @@ class OfficeWordTool(BaseTool):
         return ToolSpec(
             name="office_word",
             description=(
-                "Create or edit Microsoft Word documents on Windows (COM). "
-                "For forms based on an EXISTING template: "
-                "action=clone (NOT create) with template_path, path, replacements JSON "
-                "using EXACT full phrases from the template (never a surname alone). "
-                "Optional: action=read first to copy exact phrases. "
-                "NEVER feed read output into action=create — that destroys tables. "
-                "action=create is ONLY for a brand-new blank plain-text letter. "
-                "Other: status, read, replace_text, append, insert, save, open, close. "
-                "When the user asks to close/закрыть a Word file: action=close "
-                "(active doc, or path=). Do this on the FIRST request."
+                "Word на Windows через COM. "
+                "Когда использовать: выписки/формы по шаблону → action=clone "
+                "(template_path, path, replacements с ТОЧНЫМИ фразами из шаблона); "
+                "читать активный doc → read; править текст → replace_text; "
+                "закрыть Word-doc → close (или close_path). "
+                "Когда НЕ использовать: просто открыть файл → open_path; "
+                "PDF → close_path/open_path; create для форм (ломает таблицы). "
+                "Не вставляй dump read в create."
             ),
             parameters={
                 "type": "object",
@@ -1009,6 +1007,16 @@ Write-Output ('OPENED=' + $d.FullName)
                 content=f"open failed: {err or out}",
                 success=False,
             )
+        if code == 0 and "OPENED=" in out:
+            try:
+                from openjarvis.tools.session_context import note_opened
+
+                for line in out.splitlines():
+                    if line.startswith("OPENED="):
+                        note_opened(line.split("=", 1)[1].strip())
+                        break
+            except Exception:
+                pass
         return ToolResult(tool_name="office_word", content=out.strip(), success=True)
 
     def _close(self, path: str = "", *, save: bool = False) -> ToolResult:

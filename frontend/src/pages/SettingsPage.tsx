@@ -722,7 +722,7 @@ export function SettingsPage() {
                 />
               </button>
             </SettingRow>
-            <SettingRow label="Backend status" description="Requires Whisper, Deepgram, or another speech backend">
+            <SettingRow label="Backend status" description="Chrome/Edge: Web Speech ru-RU (cloud). Fallback: local Whisper">
               <div className="flex items-center gap-2">
                 <span
                   className="w-2 h-2 rounded-full"

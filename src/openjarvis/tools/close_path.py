@@ -62,12 +62,12 @@ class ClosePathTool(BaseTool):
         return ToolSpec(
             name="close_path",
             description=(
-                "Close an already-open file window on Windows "
-                "(PDF viewer, Word, Edge/Chrome tab title, Photos, etc.). "
-                "Use when the user says close/закрой a file. "
-                "Pass the full path if known (from the previous open), "
-                "or omit path to close the last-mentioned / active Word doc. "
-                "NEVER use open_path to close — that opens again."
+                "Закрыть уже открытое окно файла на Windows "
+                "(PDF/Foxit, Word и т.п.). "
+                "Когда использовать: «закрой», «закрыть его/файл» — "
+                "с первого запроса; path= из контекста/прошлого open. "
+                "Когда НЕ использовать: открытие (open_path); если файл "
+                "ещё не открыт. НЕ вызывай open_path для закрытия."
             ),
             parameters={
                 "type": "object",
@@ -103,10 +103,22 @@ class ClosePathTool(BaseTool):
         path = Path(raw) if raw else None
         suffix = path.suffix.lower() if path else ""
 
+        if not path:
+            from openjarvis.tools.session_context import get_last_opened
+
+            last = get_last_opened()
+            if last:
+                path = Path(last)
+                raw = last
+                suffix = path.suffix.lower()
+
         # Word documents: use COM (reliable).
         if not path or suffix in {".doc", ".docx"}:
             word = self._close_word(str(path) if path else "", save=save)
-            if word.success or not path:
+            if word.success:
+                self._note_closed(str(path) if path else word.content)
+                return word
+            if not path:
                 return word
 
         if not path:
@@ -119,16 +131,30 @@ class ClosePathTool(BaseTool):
         # Any other file (PDF, images, …): close windows by title match.
         win = self._close_by_window_title(path)
         if win.success:
+            self._note_closed(str(path.resolve()))
             return win
 
         # If Word had the file open under another extension path attempt failed earlier.
         if suffix not in {".doc", ".docx"}:
-            # Still try Word in case user opened via Word
             word2 = self._close_word(str(path), save=save)
             if word2.success:
+                self._note_closed(str(path.resolve()))
                 return word2
 
         return win
+
+    @staticmethod
+    def _note_closed(path_or_output: str) -> None:
+        try:
+            from openjarvis.tools.session_context import note_closed
+
+            text = path_or_output or ""
+            if text.startswith("CLOSED="):
+                text = text.split("CLOSED=", 1)[-1].splitlines()[0].strip()
+            if text and ("\\" in text or "/" in text):
+                note_closed(text)
+        except Exception:
+            pass
 
     def _close_word(self, path: str, *, save: bool) -> ToolResult:
         from openjarvis.tools.office_word import OfficeWordTool

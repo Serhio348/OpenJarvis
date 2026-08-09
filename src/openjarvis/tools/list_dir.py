@@ -24,9 +24,10 @@ class ListDirTool(BaseTool):
         return ToolSpec(
             name="list_dir",
             description=(
-                "List contents of one folder (optional glob in that folder). "
-                "To FIND a file anywhere on the PC, use file_search instead. "
-                "Never use shell_exec dir /s."
+                "Список содержимого одной известной папки (опционально glob). "
+                "Когда использовать: «что в папке Downloads/E:\\...». "
+                "Когда НЕ использовать: поиск файла по имени по всему диску "
+                "(file_search); shell_exec dir /s."
             ),
             parameters={
                 "type": "object",

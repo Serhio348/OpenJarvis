@@ -214,8 +214,31 @@ class OrchestratorAgent(ToolUsingAgent):
     ) -> AgentResult:
         self._emit_turn_start(input)
 
-        # Build initial messages
-        messages = self._build_messages(input, context)
+        # Fresh guard per user request — otherwise open_path(same file) is
+        # blocked across chat turns ("identical call") and the file never opens.
+        if self._loop_guard is not None:
+            self._loop_guard.reset()
+
+        # Build initial messages — MUST pass configured system_prompt
+        # (playbook / tool router). Without it, _build_messages falls back to
+        # the generic English default and DeepSeek answers in text with no tools.
+        messages = self._build_messages(
+            input, context, system_prompt=self._system_prompt
+        )
+        try:
+            from openjarvis.tools.session_context import build_file_context_prompt
+
+            file_ctx = build_file_context_prompt()
+        except Exception:
+            file_ctx = ""
+        if file_ctx:
+            if messages and messages[0].role == Role.SYSTEM:
+                messages[0] = Message(
+                    role=Role.SYSTEM,
+                    content=f"{messages[0].content}\n\n{file_ctx}",
+                )
+            else:
+                messages.insert(0, Message(role=Role.SYSTEM, content=file_ctx))
 
         # Get OpenAI-format tool definitions
         openai_tools = self._executor.get_openai_tools() if self._tools else []
@@ -416,6 +439,45 @@ class OrchestratorAgent(ToolUsingAgent):
             ]
             if replies:
                 answer = replies[-1].content
+                ok_names = {
+                    tr.tool_name for tr in all_tool_results if tr.success
+                }
+                fake = self._fake_action_reply(answer, ok_names)
+                if fake:
+                    # Heal: if a concrete path was named, open/close it now.
+                    healed = self._heal_fake_file_action(answer, fake)
+                    if healed is not None:
+                        all_tool_results.append(healed)
+                        if healed.success:
+                            self._emit_turn_end(
+                                turns=turns, content_length=len(healed.content)
+                            )
+                            return AgentResult(
+                                content=healed.content,
+                                tool_results=all_tool_results,
+                                turns=turns,
+                                metadata={
+                                    "prompt_tokens": total_prompt_tokens,
+                                    "completion_tokens": total_completion_tokens,
+                                    "total_tokens": (
+                                        total_prompt_tokens + total_completion_tokens
+                                    ),
+                                    "finalized_after": "healed_" + fake,
+                                },
+                            )
+                    if turns < self._max_turns:
+                        messages.append(
+                            Message(
+                                role=Role.USER,
+                                content=(
+                                    f"INVALID: you claimed '{fake}' via "
+                                    "assistant_reply without calling the action "
+                                    "tool. Call open_path or close_path with the "
+                                    "full path now. Do not only assistant_reply."
+                                ),
+                            )
+                        )
+                        continue
                 self._emit_turn_end(turns=turns, content_length=len(answer))
                 return AgentResult(
                     content=answer,
@@ -449,6 +511,47 @@ class OrchestratorAgent(ToolUsingAgent):
                 "total_tokens": total_prompt_tokens + total_completion_tokens,
             },
         )
+
+
+    @staticmethod
+    def _fake_action_reply(answer: str, ok_names: set[str]) -> str:
+        """Return action key if reply claims a file action without that tool."""
+        t = (answer or "").lower()
+        if any(k in t for k in ("открыл", "открыто", "opened")) and not (
+            ok_names & {"open_path", "office_word"}
+        ):
+            return "open"
+        if any(k in t for k in ("закрыл", "закрыто", "closed")) and not (
+            ok_names & {"close_path", "office_word"}
+        ):
+            return "close"
+        return ""
+
+    @staticmethod
+    def _heal_fake_file_action(answer: str, action: str) -> Optional[ToolResult]:
+        """If the fake reply names a real path, run open_path/close_path."""
+        # Allow spaces / Cyrillic in Windows paths (e.g. "Siarhei Sidarovich_CV.pdf").
+        paths = re.findall(
+            r"[A-Za-z]:\\[^\n\"'<>|*]+?\."
+            r"(?:pdf|docx?|xlsx?|pptx?|txt|md|png|jpe?g|csv)",
+            answer or "",
+            flags=re.IGNORECASE,
+        )
+        if not paths:
+            return None
+        path = paths[0].rstrip(".,;:)")
+        try:
+            if action == "open":
+                from openjarvis.tools.open_path import OpenPathTool
+
+                return OpenPathTool().execute(path=path)
+            if action == "close":
+                from openjarvis.tools.close_path import ClosePathTool
+
+                return ClosePathTool().execute(path=path)
+        except Exception:
+            return None
+        return None
 
 
 __all__ = ["OrchestratorAgent"]

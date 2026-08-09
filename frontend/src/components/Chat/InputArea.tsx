@@ -128,7 +128,7 @@ export function InputArea() {
     prevModelRef.current = selectedModel;
   }, [selectedModel, streamState.isStreaming, resetStream]);
 
-  // Allow click even if health was stale on first load — startRecording re-checks backend.
+  // Web Speech (ru-RU) works without local whisper; fallback still needs backend.
   const micDisabled = !speechEnabled || streamState.isStreaming;
   const micReason: 'not-enabled' | 'no-backend' | 'streaming' | undefined =
     !speechEnabled ? 'not-enabled'

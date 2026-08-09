@@ -31,6 +31,20 @@ class LoopVerdict:
     warned: bool = False
 
 
+# Idempotent / user-repeatable tools — never block "open this file again".
+_IDEMPOTENT_TOOLS = frozenset(
+    {
+        "open_path",
+        "close_path",
+        "list_dir",
+        "file_search",
+        "assistant_reply",
+        "office_word",
+        "file_read",
+    }
+)
+
+
 class LoopGuard:
     """Detect and prevent degenerate agent loops.
 
@@ -70,6 +84,8 @@ class LoopGuard:
 
     def check_call(self, tool_name: str, arguments: str) -> LoopVerdict:
         """Check whether a tool call should proceed or be blocked."""
+        if tool_name in _IDEMPOTENT_TOOLS:
+            return LoopVerdict()
         if self._rust_impl is not None:
             rust_result = self._rust_impl.check(tool_name, arguments)
             # Support both raw Rust return (str | None) and LoopVerdict

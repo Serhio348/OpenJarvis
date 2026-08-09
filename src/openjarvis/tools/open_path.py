@@ -24,11 +24,13 @@ class OpenPathTool(BaseTool):
         return ToolSpec(
             name="open_path",
             description=(
-                "Open a file or folder with the default Windows app "
-                "(Word for .doc/.docx, PDF viewer, Explorer for folders, etc.). "
-                "Use when the user asks to open/показать an existing file. "
-                "NEVER use this to close a file — use close_path instead. "
-                "For creating a NEW Word letter use office_word action=create instead."
+                "Открыть файл или папку приложением Windows по умолчанию "
+                "(Word, Foxit/PDF, Explorer). "
+                "Когда использовать: пользователь просит открыть/показать "
+                "существующий файл и полный путь уже известен "
+                "(из file_search, контекста или сообщения). "
+                "Когда НЕ использовать: закрытие (close_path); поиск по имени "
+                "(file_search); создание/клонирование Word (office_word)."
             ),
             parameters={
                 "type": "object",
@@ -76,6 +78,12 @@ class OpenPathTool(BaseTool):
             )
 
         kind = "folder" if path.is_dir() else "file"
+        try:
+            from openjarvis.tools.session_context import note_opened
+
+            note_opened(resolved)
+        except Exception:
+            pass
         return ToolResult(
             tool_name="open_path",
             content=f"Opened {kind}: {resolved}",

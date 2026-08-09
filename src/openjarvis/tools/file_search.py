@@ -246,14 +246,14 @@ class FileSearchTool(BaseTool):
         return ToolSpec(
             name="file_search",
             description=(
-                "Find files anywhere on this computer by name. "
-                "Use when the user asks to find/locate a file (CV, pdf, docx, etc.). "
-                "Pass query as a name fragment (e.g. 'CV', 'резюме', 'invoice') "
-                "or a glob ('*.pdf'). "
-                "Do NOT use shell_exec or list_dir for whole-disk finds. "
-                "If exactly one good match: you may open_path it. "
-                "If several matches: list the full paths for the user and ASK which "
-                "to open — do NOT call open_path until they choose."
+                "Найти файлы на этом ПК по имени. "
+                "Когда использовать: «найди», «где лежит», CV, выписка, pdf — "
+                "когда полного пути ещё нет. query= фрагмент ('Шлапаков', 'CV') "
+                "или glob ('*.pdf'). "
+                "Когда НЕ использовать: путь уже известен (сразу open_path); "
+                "просто список одной папки (list_dir); shell_exec/dir /s. "
+                "1 явный hit → можно open_path; несколько → assistant_reply "
+                "со списком путей и вопросом, какой открыть."
             ),
             parameters={
                 "type": "object",
@@ -324,6 +324,7 @@ class FileSearchTool(BaseTool):
                         h for h in es_hits if h.lower().endswith("." + ext)
                     ]
                 body = self._format(es_hits, backend="everything", query=query)
+                self._remember(query, es_hits)
                 return ToolResult(
                     tool_name="file_search",
                     content=body,
@@ -350,6 +351,7 @@ class FileSearchTool(BaseTool):
             timed_out=elapsed >= _DEFAULT_TIMEOUT_SEC - 0.05
             and len(hits) < max_results,
         )
+        self._remember(query, hits)
         return ToolResult(
             tool_name="file_search",
             content=body,
@@ -360,6 +362,15 @@ class FileSearchTool(BaseTool):
                 "elapsed_sec": round(elapsed, 2),
             },
         )
+
+    @staticmethod
+    def _remember(query: str, hits: list[str]) -> None:
+        try:
+            from openjarvis.tools.session_context import note_search
+
+            note_search(query, hits)
+        except Exception:
+            pass
 
     @staticmethod
     def _format(

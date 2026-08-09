@@ -20,12 +20,14 @@ class AssistantReplyTool(BaseTool):
         return ToolSpec(
             name="assistant_reply",
             description=(
-                "Send a message to the user. This is the ONLY way to talk "
-                "without a filesystem/office action. "
-                "Use for: greetings, clarifying questions, short status after "
-                "other tools, or 'I cannot do that yet'. "
-                "NEVER claim you opened/closed/saved/found a file here — "
-                "call file_search / open_path / close_path / office_word first."
+                "Сообщение пользователю (единственный текстовый канал). "
+                "Когда использовать: приветствие; уточнение какой файл из списка; "
+                "короткий статус ТОЛЬКО после успешного open_path/close_path/"
+                "file_search/office_word; «пока не умею». "
+                "ЗАПРЕЩЕНО: писать «Открыл файл …» или «Закрыл …» без предварительного "
+                "вызова open_path / close_path в этом же запросе — такой ответ "
+                "отклоняется. Чтобы открыть файл: сначала open_path(path=...), "
+                "потом можно assistant_reply со статусом."
             ),
             parameters={
                 "type": "object",
