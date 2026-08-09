@@ -40,6 +40,7 @@ _IDEMPOTENT_TOOLS = frozenset(
         "file_search",
         "assistant_reply",
         "office_word",
+        "office_pdf",
         "file_read",
     }
 )

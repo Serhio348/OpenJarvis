@@ -128,6 +128,11 @@ except ImportError:
     pass
 
 try:
+    import openjarvis.tools.office_pdf  # noqa: F401
+except ImportError:
+    pass
+
+try:
     import openjarvis.tools.apply_patch  # noqa: F401
 except ImportError:
     pass
