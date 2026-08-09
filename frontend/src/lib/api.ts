@@ -384,6 +384,33 @@ export async function fetchSpeechHealth(): Promise<SpeechHealth> {
   return res.json();
 }
 
+/** Edge neural TTS (default voice: ru-RU-DmitryNeural). Returns MP3 blob. */
+export async function synthesizeSpeech(
+  text: string,
+  opts?: { voice?: string; speed?: number },
+): Promise<Blob> {
+  const res = await apiFetch(`/v1/speech/synthesize`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      text,
+      voice: opts?.voice || 'ru-RU-DmitryNeural',
+      speed: opts?.speed ?? 1.0,
+    }),
+  });
+  if (!res.ok) {
+    let detail = '';
+    try {
+      const body = await res.json();
+      detail = typeof body.detail === 'string' ? body.detail : '';
+    } catch {
+      // ignore
+    }
+    throw new Error(detail || `TTS failed: ${res.status}`);
+  }
+  return res.blob();
+}
+
 // ---------------------------------------------------------------------------
 // Agent Manager
 // ---------------------------------------------------------------------------

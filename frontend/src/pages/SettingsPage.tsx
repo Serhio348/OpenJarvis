@@ -723,8 +723,8 @@ export function SettingsPage() {
               </button>
             </SettingRow>
             <SettingRow
-              label="Speak replies (Jarvis)"
-              description="Озвучивать ответы: британский мужской en-GB (Jarvis). Для русского — мужской ru-RU"
+              label="Speak replies (Дмитрий)"
+              description="Нейро-озвучка Edge: ru-RU-DmitryNeural (мужской русский). Нужен интернет; иначе запасной системный голос"
             >
               <button
                 onClick={() => { updateSettings({ speakRepliesEnabled: !settings.speakRepliesEnabled }); showSaved(); }}

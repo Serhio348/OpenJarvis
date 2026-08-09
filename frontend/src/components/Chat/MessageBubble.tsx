@@ -11,7 +11,8 @@ import { ToolCallCard } from './ToolCallCard';
 import { ResearchTimeline } from './ResearchTimeline';
 import { rehypeCitations } from '../../lib/rehype-citations';
 import { XRayFooter } from './XRayFooter';
-import { isSpeaking, speakText, stopSpeaking } from '../../hooks/useTts';
+import { toast } from 'sonner';
+import { isSpeaking, speakText, stopSpeaking, unlockAudio } from '../../hooks/useTts';
 import type { ChatMessage } from '../../types';
 
 function stripThinkTags(text: string): string {
@@ -110,16 +111,21 @@ function SpeakMessageButton({ content }: { content: string }) {
       setSpeaking(false);
       return;
     }
+    unlockAudio(); // must be sync with the click (autoplay policy)
     setSpeaking(true);
-    void speakText(content).finally(() => setSpeaking(false));
+    void speakText(content).then((r) => {
+      if (!r.ok) {
+        toast.error(r.error || 'Не удалось озвучить ответ');
+      }
+    }).finally(() => setSpeaking(false));
   };
 
   return (
     <button
       onClick={handleClick}
-      className="p-1 rounded opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
-      style={{ color: 'var(--color-text-tertiary)' }}
-      title={speaking ? 'Stop (Jarvis voice)' : 'Speak like Jarvis'}
+      className="p-1 rounded opacity-70 hover:opacity-100 transition-opacity cursor-pointer"
+      style={{ color: speaking ? 'var(--color-accent)' : 'var(--color-text-tertiary)' }}
+      title={speaking ? 'Стоп' : 'Озвучить (Дмитрий)'}
     >
       {speaking ? <Square size={14} /> : <Volume2 size={14} />}
     </button>

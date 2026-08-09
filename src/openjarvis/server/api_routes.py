@@ -930,6 +930,72 @@ async def transcribe_speech(request: Request):
     }
 
 
+@speech_router.post("/synthesize")
+async def synthesize_speech(request: Request):
+    """Synthesize text to MP3 via Edge neural TTS (default: ru-RU-DmitryNeural)."""
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+
+    text = str(body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Missing 'text'")
+    # Cap runaway payloads from chat auto-speak.
+    if len(text) > 4000:
+        text = text[:4000]
+
+    voice = str(body.get("voice") or body.get("voice_id") or "ru-RU-DmitryNeural").strip()
+    try:
+        speed = float(body.get("speed", 1.0))
+    except (TypeError, ValueError):
+        speed = 1.0
+
+    try:
+        import openjarvis.speech  # noqa: F401
+        from openjarvis.core.registry import TTSRegistry
+    except Exception as exc:
+        raise HTTPException(
+            status_code=501, detail=f"TTS subsystem unavailable: {exc}"
+        ) from exc
+
+    if not TTSRegistry.contains("edge"):
+        raise HTTPException(
+            status_code=501,
+            detail="edge TTS not available. Install with: uv sync --extra speech",
+        )
+
+    backend_cls = TTSRegistry.get("edge")
+    backend = backend_cls()
+
+    try:
+        result = await asyncio.to_thread(
+            backend.synthesize,
+            text,
+            voice_id=voice,
+            speed=speed,
+            output_format="mp3",
+        )
+    except Exception as exc:
+        logger.exception("Speech synthesis failed")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Speech synthesis failed: {exc}",
+        ) from exc
+
+    from fastapi.responses import Response
+
+    return Response(
+        content=result.audio,
+        media_type="audio/mpeg",
+        headers={
+            "X-TTS-Voice": result.voice_id or voice,
+            "X-TTS-Backend": "edge",
+            "Cache-Control": "no-store",
+        },
+    )
+
+
 @speech_router.get("/health")
 async def speech_health(request: Request):
     """Check if a speech backend is available."""

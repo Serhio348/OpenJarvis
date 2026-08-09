@@ -80,7 +80,7 @@ interface Settings {
   temperature: number;
   maxTokens: number;
   speechEnabled: boolean;
-  /** Auto-speak assistant replies (browser TTS, Jarvis-like voice). */
+  /** Auto-speak assistant replies (Edge neural Dmitry; browser fallback). */
   speakRepliesEnabled: boolean;
 }
 

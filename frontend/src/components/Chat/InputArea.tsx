@@ -7,7 +7,7 @@ import { fetchSavings, getBase } from '../../lib/api';
 import { listConnectors, getSyncStatus } from '../../lib/connectors-api';
 import { MicButton } from './MicButton';
 import { useSpeech } from '../../hooks/useSpeech';
-import { preloadTtsVoices, speakText, stopSpeaking } from '../../hooks/useTts';
+import { preloadTtsVoices, speakText, stopSpeaking, unlockAudio } from '../../hooks/useTts';
 import type {
   ChatMessage,
   MessageTelemetry,
@@ -158,7 +158,8 @@ export function InputArea() {
         // Error is captured in useSpeech
       }
     } else if (speechState === 'idle') {
-      stopSpeaking(); // don't let Jarvis talk over the mic
+      unlockAudio();
+      stopSpeaking(); // don't let TTS talk over the mic
       await startRecording();
     }
   }, [speechState, startRecording, stopRecording]);
@@ -190,6 +191,8 @@ export function InputArea() {
       return;
     }
 
+    // Unlock autoplay while we still have a user gesture (send click / Enter).
+    unlockAudio();
     setInput('');
 
     let convId = activeId;
@@ -542,7 +545,15 @@ export function InputArea() {
         researchSourcesByRef.size > 0 ? flushSources() : undefined,
       );
       if (speakRepliesEnabled && accumulatedContent.trim()) {
-        void speakText(accumulatedContent);
+        void speakText(accumulatedContent).then((r) => {
+          if (!r.ok) {
+            toast.error(
+              r.error?.includes('play') || r.error?.includes('NotAllowed')
+                ? 'Озвучка заблокирована браузером — нажми 🔊 у сообщения'
+                : (r.error || 'Озвучка не удалась'),
+            );
+          }
+        });
       }
       if (timerRef.current) {
         clearInterval(timerRef.current);
