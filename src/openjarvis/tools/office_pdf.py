@@ -1,4 +1,4 @@
-"""office_pdf.py — PDF read/search/OCR/AcroForm/merge/split for personal PC use.
+"""office_pdf.py — PDF read/search/OCR/AcroForm/merge/split/stamp for personal PC.
 
 Actions:
 1. read — extract text layer (pdfplumber)
@@ -8,6 +8,7 @@ Actions:
 5. fill — write AcroForm values to a new PDF (never overwrite template)
 6. merge — concatenate PDFs into output_path
 7. split — export selected pages to a new PDF
+8. stamp — draw text and/or PNG on pages (flat blanks / scans; new output_path)
 
 Empty path → last opened .pdf from session_context when available.
 """
@@ -34,6 +35,14 @@ _ACTIONS = (
     "fill",
     "merge",
     "split",
+    "stamp",
+)
+
+_FONT_CANDIDATES = (
+    Path(r"C:\Windows\Fonts\arial.ttf"),
+    Path(r"C:\Windows\Fonts\segoeui.ttf"),
+    Path(r"C:\Windows\Fonts\calibri.ttf"),
+    Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
 )
 
 
@@ -193,6 +202,82 @@ def _extract_pages(
         return None, None, f"PDF extraction error: {exc}"
 
 
+def _cyrillic_fontfile() -> Optional[str]:
+    for p in _FONT_CANDIDATES:
+        if p.is_file():
+            return str(p)
+    return None
+
+
+def _parse_color(raw: Any) -> tuple[float, float, float]:
+    if raw is None or raw == "":
+        return (0.0, 0.0, 0.0)
+    if isinstance(raw, (list, tuple)) and len(raw) >= 3:
+        return (float(raw[0]), float(raw[1]), float(raw[2]))
+    text = str(raw).strip()
+    if "," in text:
+        parts = [p.strip() for p in text.split(",")]
+        if len(parts) >= 3:
+            vals = [float(parts[0]), float(parts[1]), float(parts[2])]
+            # Allow 0-255 or 0-1
+            if any(v > 1 for v in vals):
+                vals = [v / 255.0 for v in vals]
+            return (vals[0], vals[1], vals[2])
+    return (0.0, 0.0, 0.0)
+
+
+def _parse_stamp_items(params: Any) -> tuple[Optional[list[dict[str, Any]]], Optional[str]]:
+    raw = params.get("items")
+    items: list[dict[str, Any]] = []
+    if raw is not None and str(raw).strip():
+        if isinstance(raw, list):
+            data = raw
+        else:
+            try:
+                data = json.loads(str(raw))
+            except json.JSONDecodeError as exc:
+                return None, f"items must be JSON array: {exc}"
+        if not isinstance(data, list):
+            return None, "items must be a JSON array of stamp objects."
+        for i, entry in enumerate(data):
+            if not isinstance(entry, dict):
+                return None, f"items[{i}] must be an object."
+            items.append(entry)
+
+    # Shortcut: single text stamp via top-level params.
+    text = str(params.get("text") or "").strip()
+    if text:
+        items.append(
+            {
+                "page": params.get("page", 1),
+                "x": params.get("x", 72),
+                "y": params.get("y", 720),
+                "text": text,
+                "fontsize": params.get("fontsize", 12),
+                "color": params.get("color", "0,0,0"),
+            }
+        )
+    image = str(params.get("image") or "").strip()
+    if image:
+        items.append(
+            {
+                "page": params.get("page", 1),
+                "x": params.get("x", 72),
+                "y": params.get("y", 100),
+                "width": params.get("width", 120),
+                "height": params.get("height", 40),
+                "image": image,
+            }
+        )
+
+    if not items:
+        return None, (
+            "stamp needs items JSON array and/or text=/image= shortcut. "
+            "Coords: PDF points, origin bottom-left."
+        )
+    return items, None
+
+
 def _configure_tesseract() -> Optional[str]:
     """Return error message if tesseract binary missing; else None."""
     import os
@@ -247,13 +332,15 @@ class OfficePdfTool(BaseTool):
             name="office_pdf",
             description=(
                 "Работа с PDF на этом ПК: чтение текста, поиск, OCR сканов, "
-                "список/заполнение AcroForm-полей, склейка и нарезка страниц. "
-                "Когда использовать: прочитать/найти текст в PDF; OCR если "
-                "текста нет (скан); заполнить форму с полями; склеить/вырезать. "
-                "Когда НЕ использовать: просто открыть PDF в просмотрщике → "
-                "open_path; Word → office_word; XFA/LiveCycle формы не "
-                "поддерживаются. path можно опустить, если PDF уже в "
-                "КОНТЕКСТЕ ФАЙЛОВ (последний открытый .pdf)."
+                "AcroForm fill, склейка/нарезка, штамп текста/PNG поверх скана. "
+                "Когда использовать: прочитать/найти текст; OCR если скан; "
+                "fillable форма → list_fields/fill; бланк/скан без полей → "
+                "stamp (текст/картинка по координатам, новый output_path); "
+                "склеить/вырезать → merge|split. "
+                "Когда НЕ использовать: просто открыть PDF → open_path; "
+                "Word → office_word; XFA/LiveCycle не поддерживаются. "
+                "stamp coords: PDF points, origin bottom-left. "
+                "path можно опустить, если PDF в КОНТЕКСТЕ ФАЙЛОВ."
             ),
             parameters={
                 "type": "object",
@@ -262,7 +349,7 @@ class OfficePdfTool(BaseTool):
                         "type": "string",
                         "description": (
                             "read | search | ocr | list_fields | fill | "
-                            "merge | split"
+                            "merge | split | stamp"
                         ),
                     },
                     "path": {
@@ -299,13 +386,61 @@ class OfficePdfTool(BaseTool):
                     },
                     "output_path": {
                         "type": "string",
-                        "description": "Output PDF path for fill/merge/split.",
+                        "description": (
+                            "Output PDF path for fill/merge/split/stamp."
+                        ),
                     },
                     "output_dir": {
                         "type": "string",
                         "description": (
                             "Optional dir for split (one file per page)."
                         ),
+                    },
+                    "items": {
+                        "type": "string",
+                        "description": (
+                            "For stamp: JSON array of "
+                            '{"page":1,"x":72,"y":720,"text":"..."} and/or '
+                            '{"page":1,"x":72,"y":100,"width":120,'
+                            '"height":40,"image":"C:\\\\sign.png"}. '
+                            "Coords: points, origin bottom-left."
+                        ),
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Shortcut single text for stamp.",
+                    },
+                    "image": {
+                        "type": "string",
+                        "description": "Shortcut single PNG/JPG path for stamp.",
+                    },
+                    "page": {
+                        "type": "integer",
+                        "description": "1-based page for stamp shortcut.",
+                    },
+                    "x": {
+                        "type": "number",
+                        "description": "X for stamp shortcut (bottom-left origin).",
+                    },
+                    "y": {
+                        "type": "number",
+                        "description": "Y for stamp shortcut (bottom-left origin).",
+                    },
+                    "fontsize": {
+                        "type": "number",
+                        "description": "Font size for stamp text shortcut.",
+                    },
+                    "width": {
+                        "type": "number",
+                        "description": "Image width for stamp shortcut.",
+                    },
+                    "height": {
+                        "type": "number",
+                        "description": "Image height for stamp shortcut.",
+                    },
+                    "color": {
+                        "type": "string",
+                        "description": 'RGB "0,0,0" or "0,0,255" for stamp text.',
                     },
                 },
                 "required": ["action"],
@@ -327,6 +462,8 @@ class OfficePdfTool(BaseTool):
             return self._fill(params)
         if action == "split":
             return self._split(params)
+        if action == "stamp":
+            return self._stamp(params)
         if action == "list_fields":
             return self._list_fields(params)
         if action == "ocr":
@@ -569,8 +706,9 @@ class OfficePdfTool(BaseTool):
             fields = reader.get_fields() or {}
             if not fields:
                 return _fail(
-                    "No AcroForm fields — cannot fill "
-                    "(XFA/LiveCycle and flat scans not supported)."
+                    "No AcroForm fields — cannot fill. "
+                    "For flat scans/blanks use action=stamp. "
+                    "XFA/LiveCycle not supported."
                 )
             unknown = [k for k in values if k not in fields]
             writer = PdfWriter()
@@ -598,6 +736,126 @@ class OfficePdfTool(BaseTool):
             file_path=str(out_path.resolve()),
             source=str(path.resolve()),
             fields_set=len(values) - len(unknown),
+        )
+
+    def _stamp(self, params: Any) -> ToolResult:
+        path, err = _resolve_pdf_path(
+            str(params.get("path") or params.get("file_path") or "")
+        )
+        if err or path is None:
+            return _fail(err or "No path.")
+
+        items, ierr = _parse_stamp_items(params)
+        if ierr or items is None:
+            return _fail(ierr or "No stamp items.")
+
+        out_raw = str(params.get("output_path") or "").strip()
+        out_path = Path(out_raw) if out_raw else _default_output(path.stem + "_stamped")
+        if out_path.resolve() == path.resolve():
+            return _fail(
+                "output_path must be a new file — refusing to overwrite template."
+            )
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            import pymupdf
+        except ImportError:
+            return _fail(
+                "pymupdf not installed. Install with: uv sync --extra pdf"
+            )
+
+        fontfile = _cyrillic_fontfile()
+        applied = 0
+        try:
+            doc = pymupdf.open(str(path))
+        except Exception as exc:
+            return _fail(f"Cannot open PDF for stamp: {exc}")
+
+        try:
+            for i, item in enumerate(items):
+                try:
+                    page_no = int(item.get("page", 1))
+                except (TypeError, ValueError):
+                    return _fail(f"items[{i}]: invalid page.")
+                if page_no < 1 or page_no > doc.page_count:
+                    return _fail(
+                        f"items[{i}]: page {page_no} out of range "
+                        f"(1..{doc.page_count})."
+                    )
+                page = doc[page_no - 1]
+                page_h = float(page.rect.height)
+
+                try:
+                    x = float(item.get("x", 72))
+                    y = float(item.get("y", 720))
+                except (TypeError, ValueError):
+                    return _fail(f"items[{i}]: x/y must be numbers.")
+
+                image_path = str(item.get("image") or "").strip()
+                text = item.get("text")
+                if image_path:
+                    img = Path(image_path)
+                    if not img.is_file():
+                        return _fail(f"items[{i}]: image not found: {image_path}")
+                    try:
+                        width = float(item.get("width", 120))
+                        height = float(item.get("height", 40))
+                    except (TypeError, ValueError):
+                        return _fail(f"items[{i}]: width/height must be numbers.")
+                    # User (x,y)=bottom-left of image → pymupdf top-left rect.
+                    y0 = page_h - y - height
+                    y1 = page_h - y
+                    rect = pymupdf.Rect(x, y0, x + width, y1)
+                    page.insert_image(rect, filename=str(img))
+                    applied += 1
+                elif text is not None and str(text) != "":
+                    fontsize = float(item.get("fontsize", 12) or 12)
+                    color = _parse_color(item.get("color"))
+                    # User bottom-left baseline → pymupdf top-left y.
+                    point = pymupdf.Point(x, page_h - y)
+                    text_s = str(text)
+                    if fontfile:
+                        # fontname is the PDF resource name; fontfile embeds TTF.
+                        page.insert_text(
+                            point,
+                            text_s,
+                            fontsize=fontsize,
+                            color=color,
+                            fontfile=fontfile,
+                            fontname="ojarial",
+                        )
+                    else:
+                        # Fallback: TextWriter + builtin may still fail on Cyrillic.
+                        page.insert_text(
+                            point,
+                            text_s,
+                            fontsize=fontsize,
+                            color=color,
+                            fontname="helv",
+                        )
+                    applied += 1
+                else:
+                    return _fail(
+                        f"items[{i}]: need 'text' or 'image' key."
+                    )
+
+            doc.save(str(out_path))
+        except Exception as exc:
+            return _fail(f"Stamp failed: {exc}")
+        finally:
+            doc.close()
+
+        _note_pdf(out_path)
+        font_note = (
+            f" font={fontfile}"
+            if fontfile
+            else " (warning: no Unicode TTF found; Cyrillic may fail)"
+        )
+        return _ok(
+            f"Stamped {applied} item(s) → {out_path.resolve()}{font_note}",
+            file_path=str(out_path.resolve()),
+            source=str(path.resolve()),
+            items_applied=applied,
         )
 
     def _merge(self, params: Any) -> ToolResult:

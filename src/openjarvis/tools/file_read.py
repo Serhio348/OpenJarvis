@@ -33,7 +33,7 @@ class FileReadTool(BaseTool):
                 "Read a text file from disk by path. "
                 "Do NOT use for directories (use list_dir) or for an already-open "
                 "Word document (use office_word). PDF text/forms (use office_pdf). "
-                "Excel .xlsx (use office_excel)."
+                "Excel .xlsx (use office_excel). PowerPoint .pptx (use office_pptx)."
             ),
             parameters={
                 "type": "object",

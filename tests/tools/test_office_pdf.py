@@ -129,3 +129,47 @@ class TestOfficePdfForms:
         result = tool.execute(action="list_fields", path=str(f))
         assert result.success is True
         assert "No AcroForm" in result.content
+
+
+class TestOfficePdfStamp:
+    def test_stamp_text_and_image(
+        self, tool: OfficePdfTool, tmp_path: Path
+    ) -> None:
+        pymupdf = pytest.importorskip("pymupdf")
+        from PIL import Image
+
+        src = tmp_path / "blank.pdf"
+        doc = pymupdf.open()
+        doc.new_page(width=400, height=300)
+        doc.save(src)
+        doc.close()
+
+        png = tmp_path / "mark.png"
+        Image.new("RGB", (40, 20), color=(255, 0, 0)).save(png)
+
+        out = tmp_path / "stamped.pdf"
+        items = (
+            '[{"page":1,"x":50,"y":250,"text":"Hello stamp","fontsize":14},'
+            f'{{"page":1,"x":50,"y":40,"width":80,"height":30,'
+            f'"image":"{png.as_posix()}"}}]'
+        )
+        result = tool.execute(
+            action="stamp",
+            path=str(src),
+            items=items,
+            output_path=str(out),
+        )
+        assert result.success is True, result.content
+        assert out.exists()
+        assert out.stat().st_size > src.stat().st_size
+
+        # Refuse overwrite
+        bad = tool.execute(
+            action="stamp",
+            path=str(src),
+            text="x",
+            x=10,
+            y=10,
+            output_path=str(src),
+        )
+        assert bad.success is False

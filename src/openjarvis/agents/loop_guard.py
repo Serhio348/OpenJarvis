@@ -42,6 +42,7 @@ _IDEMPOTENT_TOOLS = frozenset(
         "office_word",
         "office_pdf",
         "office_excel",
+        "office_pptx",
         "file_read",
     }
 )
