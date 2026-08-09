@@ -41,6 +41,7 @@ _IDEMPOTENT_TOOLS = frozenset(
         "assistant_reply",
         "office_word",
         "office_pdf",
+        "office_excel",
         "file_read",
     }
 )

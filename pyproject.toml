@@ -130,6 +130,7 @@ pdf = [
     "pytesseract>=0.3.10",
     "pillow>=10.0",
 ]
+excel = ["openpyxl>=3.1"]
 scheduler = ["croniter>=2.0"]
 security-signing = ["cryptography>=43"]
 sandbox-wasm = ["wasmtime>=25"]
